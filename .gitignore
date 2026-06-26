@@ -2,3 +2,9 @@ build/
 install/
 log/
 __pycache__/
+node_modules/
+debian/
+*.pyc
+*.so
+*.o
+*.a
