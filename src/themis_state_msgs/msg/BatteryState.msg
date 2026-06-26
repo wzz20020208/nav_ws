@@ -1,0 +1,11 @@
+# BatteryState.msg
+float64[] battery_state
+float64[] error_state
+float64[] battery_voltages
+float64[] cell_voltages
+float64[] temperatures
+float64[] discharge_statuses
+float64[] charge_statuses
+float64[] max_discharge_currents
+float64[] max_charge_currents
+float64[] present_currents

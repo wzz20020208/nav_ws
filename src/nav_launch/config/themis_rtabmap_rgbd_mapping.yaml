@@ -1,0 +1,198 @@
+# ============================================================
+# RTAB-Map RGB-D 建图模式配置 — THEMIS (TH02-A7)
+# 模式: 增量建图 (mapping), 使用 RGB-D 相机
+# 里程计: 外部轮式里程计
+# ============================================================
+# 使用方式:
+#   ros2 launch nav_launch themis_rtabmap_rgbd_mapping.launch.py
+#   ros2 launch nav_launch themis_rtabmap_rgbd_mapping.launch.py \
+#       database_path:=/path/to/map.db
+# ============================================================
+#
+# 与定位模式的区别:
+#   - Mem/IncrementalMemory=true   → 向地图增量添加新节点
+#   - Mem/InitWMWithAllNodes=false → 启动时不加载历史节点, 从零建图
+#   - ICP 匹配更宽松              → 适应新环境探索
+#   - 回环检测启用                → 检测并闭合回环
+#   - 不清空数据库                → 增量保存地图
+# ============================================================
+
+/**:
+  launch:
+    # 使用 RGB-D 深度模式 (rtabmap_launch 内部同步, 无需外部 rgbd_sync)
+    subscribe_rgbd: "false"
+    subscribe_depth: "true"
+
+    # RGB 图像 (原始话题, rgbd_sync 订阅)
+    rgb_topic: "/chest_camera/chest_camera/image_raw"
+    camera_info_topic: "/chest_camera/chest_camera/camera_info"
+
+    # 深度图像 (原始话题, rgbd_sync 订阅)
+    depth_topic: "/chest_camera/chest_camera/depth/image_raw"
+
+    # IMU (原始话题)
+    imu_topic: "/base_imu"
+
+    # 里程计 (外部融合)
+    odom_topic: "/odom"
+
+    # 坐标系
+    frame_id: "BASE_LINK"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    publish_tf: "true"
+
+  rtabmap:
+    ros__parameters:
+
+      # ──────────────────────────────────────────────────────
+      # 配准策略
+      # ──────────────────────────────────────────────────────
+      # 策略: 0=Vis+ICP (建图模式推荐视觉+ICP, 提高鲁棒性)
+      Reg/Strategy: "0"
+      # 不强制 3DoF (允许 6DoF 位姿)
+      Reg/Force3DoF: "false"
+      # 邻近链接优化 (提高回环精度)
+      RGBD/NeighborLinkRefining: "true"
+      # 最大优化误差 (建图模式可设为 0 不限制)
+      RGBD/OptimizeMaxError: "0"
+
+      # ──────────────────────────────────────────────────────
+      # ICP 点云配准 (建图模式: 宽松匹配适应探索)
+      # ──────────────────────────────────────────────────────
+      Icp/PointToPlane: "false"
+      # 最大迭代次数 (建图模式适当提高)
+      Icp/Iterations: 30
+      # 对应点最大搜索距离 (米, 建图模式放宽)
+      Icp/MaxCorrespondenceDistance: 1.0
+      # 有效对应点比例下限
+      Icp/CorrespondenceRatio: 0.2
+      # 收敛阈值
+      Icp/Epsilon: 0.001
+      # 外点比例
+      Icp/OutlierRatio: 0.6
+      # 降采样体素 (米)
+      Icp/VoxelSize: 0.1
+      # 降采样策略
+      Icp/DownsamplingStep: 1
+      # 最大允许平移 (米, 建图模式放宽以允许大范围探索)
+      Icp/MaxTranslation: 1.0
+      # 最大允许旋转 (弧度)
+      Icp/MaxRotation: 1.0
+
+      # ──────────────────────────────────────────────────────
+      # 2D 占据栅格地图
+      # ──────────────────────────────────────────────────────
+      Grid/3D: "false"
+      Grid/RayTracing: "true"
+      Grid/RangeMax: 5.0
+      Grid/RangeMin: 0.5
+      Grid/MinGroundHeight: -1.3       # 探底：比真实地面（-1.2）稍微低一点，容忍点云噪点
+      Grid/MaxGroundHeight: -1.05      # 封顶：真实地面往上约 10-15cm。只要高于 -1.05m 的点，统统算作障碍物！
+      Grid/MaxObstacleHeight: 1.0
+      Grid/CellSize: 0.05
+      # --- 机器人本体点云过滤 (解决大腿被识别为障碍物) ---
+      # 定义以机器人为中心的 3D 包围盒 (LocalMapMaker.hpp:92)，盒内点云被移除
+      Grid/FootprintLength: 0.0       # 前后方向 (米)，根据机器人实际尺寸调整
+      Grid/FootprintWidth: 0.0        # 左右方向 (米)
+      Grid/FootprintHeight: 0.0       # 高度 (米)，需覆盖到大腿可见高度
+      # --- 全局足迹清除 (路径下方 2D 栅格清除) ---
+      # 注意：命名空间是 GridGlobal 而非 Grid，之前 Grid/FootprintRadius 是无效参数！
+      GridGlobal/FootprintRadius: 0.0
+      Grid/NormalsSegmentation: "false"
+      Grid/GroundIsObstacle: "false"
+      Grid/FullUpdate: "false"
+      Grid/UpdateError: 0.01
+      Grid/NoiseFilteringMinPoints: 5
+      Grid/ClusterRadiusMin: 0.1
+      Grid/FromDepth: "true"
+      Grid/PreVoxelFiltering: "true"
+      Grid/PreVoxelFilteringSize: 0.05
+
+      # ──────────────────────────────────────────────────────
+      # 视觉特征检测
+      # ──────────────────────────────────────────────────────
+      # 特征类型: 0=SURF, 6=ORB (建图推荐 ORB, 速度快)
+      Vis/FeatureType: "6"
+      Vis/MaxFeatures: 1000
+      # 最小匹配内点数
+      Vis/MinInliers: 12
+      # 重投影误差阈值 (像素, RTAB-Map 默认 3.0)
+      Vis/InlierDistance: 3.0
+      # NNDR 比率 (收紧减少误匹配)
+      Vis/CorNNDR: 0.6
+      Vis/PnPFlags: "0"
+      Vis/BundleAdjustment: "1"
+
+      # ──────────────────────────────────────────────────────
+      # 词袋 / 字典 (BoW Vocabulary)
+      # ──────────────────────────────────────────────────────
+      # FLANN 词汇表增量构建并保存到数据库 (定位模式依赖此词汇表)
+      Kp/IncrementalFlann: "true"
+      # 将 FLANN 索引持久化保存到数据库 (定位时可直接加载)
+      Kp/FlannIndexSaved: "true"
+      # 参与构建字典的特征数 (与 Vis/MaxFeatures 保持一致)
+      Kp/MaxFeatures: "1000"
+      # TF-IDF 加权回环检测 (提高回环准确性)
+      Kp/TfIdfLikelihoodUsed: "true"
+      # 坏视觉词比率阈值 (超过触发恢复)
+      Kp/BadSignRatio: "0.3"
+      # 增量字典更新
+      Kp/IncrementalDictionary: "true"
+      # 检测器策略: 6=ORB (与 Vis/FeatureType 一致)
+      Kp/DetectorStrategy: "6"
+
+      # ──────────────────────────────────────────────────────
+      # 回环检测 (建图模式: 开启)
+      # ──────────────────────────────────────────────────────
+      # STM 大小 (短期记忆窗口)
+      Mem/STMSize: 30
+      # 空间邻近回环检测
+      RGBD/ProximityBySpace: "true"
+      # 空间回环检测半径 (米)
+      RGBD/LocalLoopDetectionRadius: 10.0
+      # 回环阈值
+      Rtabmap/LoopThr: 0.11
+      # 不使用 GPS 辅助回环 (无 GPS)
+      Mem/UseGPSForLoopClosureCandidate: "false"
+
+      # ──────────────────────────────────────────────────────
+      # 图优化 (建图模式: 全局优化)
+      # ──────────────────────────────────────────────────────
+      Optimizer/Strategy: "1"
+      Optimizer/Iterations: 20
+      Optimizer/Robust: "true"
+      Optimizer/GravitySigma: "0.3"
+
+      # ──────────────────────────────────────────────────────
+      # 内存 / 关键帧管理
+      # ──────────────────────────────────────────────────────
+      Mem/GenerateMap: "true"
+      # 不保留双目/深度数据 (节省内存)
+      Mem/BinDataKept: "false"
+      Mem/UseOdomGravity: "false"
+      # 关键帧创建阈值 (线性位移 米)
+      RGBD/LinearUpdate: 0.2
+      # 关键帧创建阈值 (角度 弧度)
+      RGBD/AngularUpdate: 0.1
+
+      # ──────────────────────────────────────────────────────
+      # AprilTag 标记检测 (辅助全局定位)
+      # ──────────────────────────────────────────────────────
+      RGBD/MarkerDetection: "true"
+      Marker/Dictionary: "20"
+      Marker/Length: "0.16"
+      Landmark/Variance: "0.05"
+
+      # ──────────────────────────────────────────────────────
+      # 同步 (队列大小通过 launch arg 传递, 此处仅作记录)
+      # ──────────────────────────────────────────────────────
+      # topic_queue_size: 30
+      # sync_queue_size: 30
+
+      # ──────────────────────────────────────────────────────
+      # QoS (0=系统默认, 1=Reliable, 2=Best Effort)
+      # ──────────────────────────────────────────────────────
+      qos_image: 2
+      qos_camera_info: 2
+      qos_odom: 2

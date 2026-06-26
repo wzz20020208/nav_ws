@@ -1,0 +1,279 @@
+# ============================================================
+# THEMIS Nav2 导航参数配置
+# 使用方式:
+#   ros2 launch nav_launch themis_navigation.launch.py
+#   ros2 launch nav_launch themis_navigation.launch.py \
+#       params_file:=/path/to/custom_params.yaml
+# ============================================================
+
+# ----------------- 生命周期管理器 -----------------
+lifecycle_manager_navigation:
+  ros__parameters:
+    use_sim_time: true
+    autostart: true
+    node_names: ['controller_server', 'planner_server', 'behavior_server',
+                 'bt_navigator', 'waypoint_follower', 'local_costmap',
+                 'global_costmap']
+
+# ----------------- 行为树导航器 -----------------
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: BASE_LINK
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    navigators: ['navigate_to_pose', 'navigate_through_poses']
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+      goal_reached_tol: 0.25
+      goal_reached_yaw_tol: 0.50
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+
+# ----------------- 规划器 (全局路径规划) -----------------
+# NavfnPlanner: 基于势场的 Dijkstra 全局规划器。
+# 全向机器人的运动学约束由 MPPI 局部控制器处理，全局规划只需
+# 提供无碰撞的路径走廊。势场法生成的路径天然平滑，不会因
+# 平滑器引入额外偏移。
+# 碰撞箱半尺寸与 MPPI controller footprint 保持一致：
+#   front/back=0.20m → x=±0.20m, left/right=0.30m → y=±0.30m
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 10.0
+    use_sim_time: true
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false                 # Dijkstra（势场法），路径平滑无锯齿
+      allow_unknown: true
+
+# ----------------- 控制器 (局部路径规划) -----------------
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 999.0           # 禁用卡死判定：不因控制器失败触发恢复
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.0    # 禁用移动进度检查
+      movement_time_allowance: 999999.0 # 禁用超时判定
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.20          # 20cm, MPPI 移动容差
+      yaw_goal_tolerance: 0.087       # 5°
+
+    FollowPath:
+      plugin: "nav2_custom_plugins/MPPIGPUController"
+      num_samples: 3000
+      prediction_horizon: 10      # 预测步数 (dt×H×max_v = 0.3×10×0.4 = 1.2m, 覆盖 0.5m 前瞻点)
+      dt: 0.3
+      max_v: 0.30             # 前向最大速度 (m/s)，预测余量 2.0m (3.0m预测-1.0m前瞻)
+      min_v: -0.10             # 允许微退 (原-0.50→-0.15)
+      max_vy: 0.10            # 横向最大速度 (原0.20→0.35, 允许更大横向运动)
+      max_w: 0.18           # 60°/s → rad/s，物理上限不改
+      action_std_v: 0.25         # vx 噪声标准差 (原0.10→0.25, 扩大前向/后向探索覆盖)
+      action_std_vy: 0.15       # vy 噪声标准差 (原0.10→0.15, 进一步扩大横向采样)
+      action_std_w: 0.25        # 角速度噪声 (原0.10→0.25, 扩大角度探索)
+      lambda: 15.0              # MPPI 温度系数 (0.5太贪→1.2, 保留采样多样性)
+      collision_cost: 8.0         # 障碍物排斥力 (norm^6, 5太冲8太怂, 6平衡)
+      # 前瞻：固定 2m，不再速度自适应
+      # L = max(min_lookahead_dist, current_speed × lookahead_time)
+      lookahead_time: 0.0          # 前瞻时间 (s)，0 = 固定前瞻距离
+      min_lookahead_dist: 0.5    # 前瞻距离 (m)，预测到前瞻点而非终点
+      lookahead_kp: 0.7            # 前瞻点 KP 减速: 1.0=禁用 (碰撞代价由GPU内核硬约束保证)
+      lookahead_theta_rate: 0.5    # 前瞻点朝向最大变化率 (rad/s)，0=禁用限制，≈28°/s
+      # ── 朝向偏差限速: 机器人朝向与目标方向偏差超阈值时强制降速 ──
+      enable_heading_speed_limit: true           # 是否启用朝向偏差限速
+      heading_misalign_threshold: 1.57           # 偏差阈值 (rad), 默认 90°=1.57
+      heading_misalign_max_speed: 0.0           # 超阈值时的最大矢量速度 (m/s)
+      path_attraction_weight: 1.0 # 路径吸引 (原0.6→0.8, /H后补偿)
+      # 路径对齐采样：提升轨迹与全局路径的相关性
+      guidance_weight: 0.5    # 路径引导权重 (0.3→0.5, ω强锚定路径方向)
+      cross_track_noise_scale: 1.5 # 横向噪声缩放 (原1.2→1.5, 进一步扩大横向探索)
+      noise_decay_rate: 0.65        # 噪声衰减 (原0.85→0.65, 末端保留35%噪声扩大探索)
+      # ── 探索范围距离衰减: 越远越衰减 ──
+      exploration_decay_start: 3.0     # 衰减起始距离 (m), >此距离探索=floor (跟随路径)
+      exploration_decay_end: 0.5       # 衰减结束距离 (m), <此距离探索=1.0 (精细定位)
+      exploration_decay_floor: 0.3     # 远距离探索下限, 最小保留 30% 探索范围
+      spatial_decay_weight: 0.5        # 空间衰减混合权重: 0=纯时间步衰减, 1=纯空间距离衰减
+      # ── 采样噪声下限: 各维度独立，先乘距离衰减再钳位 (0~1) ──
+      noise_scale_floor_vx: 0.10       # vx 噪声尺度下限
+      noise_scale_floor_vy: 0.10       # vy 噪声尺度下限 (略高，保证横向探索)
+      noise_scale_floor_w: 0.10        # omega 噪声尺度下限 (0.20→0.30, 保留更多转弯探索)
+      # ── 纯角速度采样: 部分轨迹先原地旋转对准路径，再平移前进 ──
+      pure_rotation_ratio: 0.30        # 纯旋转轨迹占比 (0~1), 0=禁用
+      pure_rotation_steps: 2           # 纯旋转持续步数
+      pure_rotation_w_boost: 1.5       # 旋转步 omega 噪声增强倍数
+      enable_lateral_bias: false     # 关闭横向偏好分析，避免"向右偏执"
+      vel_direction_weight: 1.0  # 以路径方向为主，减少惯性前行
+      speed_reward_weight: 4.0    # 速度奖励 (6→4, 进一步降前进让转弯)
+      heading_weight: 50.0          # 统一朝向奖励权重 (8→12, 强力纠偏对抗推头)
+      lateral_guidance_scale: 0.3  # 横向 guidance 缩放 (0.15→0.3, 允许转弯时侧移)
+      turn_lateral_boost: 2.0    # 转弯横向增强: 急弯时自动放大 vy 引导/噪声并放松朝向约束 (0=关闭, 原4.0过大导致摆动)
+      ema_alpha: 0.1               # 输出 EMA 平滑系数: 0=冻结, 1=无平滑 (20Hz下≈0.25s时间常数)
+      enable_ema: false            # 是否启用 EMA 输出平滑，关闭则直接输出原始 MPPI 控制量
+      lookahead_proximity_weight: 6.0  # 前瞻点接近奖励 (3→10→6, 适度拉向窄通道)
+      lookahead_proximity_decay: 0.8   # 前瞻点接近奖励衰减距离 (原0.3→0.8, 扩大有效覆盖范围)
+      # 两层控制架构距离阈值
+      #   层级1 MPPI:            全程
+      #   层级2 终端角度对准:     dist_to_final < terminal_angle_dist (0.10m)
+      terminal_angle_dist: 0.10    # 终端角度对准距离 (m)
+      terminal_angle_kp: 1.5          # 终端角度 P 控制器增益
+      terminal_angle_tolerance: 0.07   # 终端角度容忍度 (rad), ≈4°, 留1°裕量给 5° goal checker
+      # 碰撞箱半尺寸 (m)：前/后/左/右，用于 GPU kernel 中的多点障碍物检测
+      # 机器人长0.40m(x轴)，宽0.60m(y轴，宽边侧面)
+      footprint_front: 0.17        # 前向半尺寸
+      footprint_back: 0.17         # 后向半尺寸
+      footprint_left: 0.28         # 左向半尺寸
+      footprint_right: 0.28        # 右向半尺寸
+      # ── 代价函数内部参数（原硬编码常量，现暴露为可配置参数） ──
+      cost_vy_threshold: 0.0           # vy 代价视角阈值 (m/s), 0=禁用
+      terminal_dist_weight: 2.0        # ⑥ 终端距离代价权重
+      path_length_weight: 0.2          # ⑤ 路径长度代价权重
+      goal_attraction_weight: 0.3      # ① 目标渐进吸引基础权重
+      path_follow_scale_increment: 1.2 # ③ 路径吸引时间递增因子
+      goal_soft_radius: 0.4            # 平滑到达阻尼半径 (m)
+      base_speed_floor_ratio: 0.55     # 保底速度比例 (防止base序列塌缩)
+      turn_lateral_max_boost: 6.0      # 转弯横向最大放大倍数上限
+      footprint_sample_spacing: 0.04   # 足迹碰撞检测采样间距 (原0.08→0.04, 加密提高精度)
+      rear_obstacle_cost: 200.0    # 后方隐形障碍代价地板 (0~255), 0=禁用, 160=轻~中度, 254=致命
+      # ── 分层规划: 全局轨迹直接预测到终点，解决短视 ──
+      global_trajectory_ratio: 0.2       # 全局轨迹占比 (0~1), 0.2=20%轨迹预测到终点
+      global_horizon: 30                 # 全局轨迹预测步数 (30×0.3=9s, 覆盖长距离)
+
+# ----------------- 行为/恢复服务器 -----------------
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom
+    robot_base_frame: BASE_LINK
+    transform_tolerance: 0.1
+    use_sim_time: true
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+# ----------------- 全局代价地图 -----------------
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: BASE_LINK
+      use_sim_time: true
+      footprint: "[[0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30]]"
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        map_topic: /rtabmap/map
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.25      # 内接圆0.20m+余量, MPPI处理实际矩形碰撞
+
+# ----------------- 局部代价地图 -----------------
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: BASE_LINK
+      use_sim_time: true
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      footprint: "[[0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30]]"
+
+      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        map_topic: /rtabmap/map
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True 
+        
+        # --- 控制体素网格的整体高度 ---
+        origin_z: 0.0            
+        z_resolution: 0.1        # Z轴分辨率 10cm
+        z_voxels: 14             # 14层 * 0.1m = 1.4m 的总网格高度 (覆盖机器人的 1.2m 身高)
+        
+        # ★ 核心参数：决定哪些高度的障碍物会被投影到2D地图上
+        max_obstacle_height: 1.7 # 忽略 1.3m 以上的障碍物，允许机器人从下方穿过
+        
+        # 未知区域处理（如果雷达扫不到上方，默认上方是安全的）
+        unknown_threshold: 15
+        mark_threshold: 0
+
+        observation_sources: pointcloud_sensor
+        pointcloud_sensor:
+          topic: /chest_camera/points_sparse
+          data_type: "PointCloud2"
+          
+          # ★ 核心参数：在数据源头过滤掉不需要关心的高空点云
+          max_obstacle_height: 1.7 # 高于 1.3m 的雷达点云直接扔掉，节省 CPU 算力
+          min_obstacle_height: 0.1 # 过滤掉 0.1m 以下的地面点云
+          
+          obstacle_max_range: 3.0
+          raytrace_max_range: 3.5
+          clearing: True
+          marking: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 2.0    # 平缓衰减 → 通道内形成平滑梯度引导走中间
+        inflation_radius: 0.5       # 大膨胀半径 → 势场覆盖整个通道宽度
+
+# ----------------- 航点跟随器 -----------------
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      waypoint_pause_duration: 200
+ 

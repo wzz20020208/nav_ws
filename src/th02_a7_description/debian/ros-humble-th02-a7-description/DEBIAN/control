@@ -1,0 +1,8 @@
+Package: ros-humble-th02-a7-description
+Version: 0.2.6-0jammy
+Architecture: amd64
+Maintainer: Westwoodrobotics <info@westwoodrobotics.io>
+Installed-Size: 51131
+Section: misc
+Priority: optional
+Description: Robot description for TH02-A7

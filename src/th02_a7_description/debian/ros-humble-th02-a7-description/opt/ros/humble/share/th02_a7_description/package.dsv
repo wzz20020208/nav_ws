@@ -1,0 +1,4 @@
+source;share/th02_a7_description/local_setup.bash
+source;share/th02_a7_description/local_setup.dsv
+source;share/th02_a7_description/local_setup.sh
+source;share/th02_a7_description/local_setup.zsh

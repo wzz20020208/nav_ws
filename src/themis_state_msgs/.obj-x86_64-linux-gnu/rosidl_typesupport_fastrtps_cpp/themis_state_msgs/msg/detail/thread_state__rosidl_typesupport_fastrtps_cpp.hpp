@@ -1,0 +1,80 @@
+// generated from rosidl_typesupport_fastrtps_cpp/resource/idl__rosidl_typesupport_fastrtps_cpp.hpp.em
+// with input from themis_state_msgs:msg/ThreadState.idl
+// generated code does not contain a copyright notice
+
+#ifndef THEMIS_STATE_MSGS__MSG__DETAIL__THREAD_STATE__ROSIDL_TYPESUPPORT_FASTRTPS_CPP_HPP_
+#define THEMIS_STATE_MSGS__MSG__DETAIL__THREAD_STATE__ROSIDL_TYPESUPPORT_FASTRTPS_CPP_HPP_
+
+#include "rosidl_runtime_c/message_type_support_struct.h"
+#include "rosidl_typesupport_interface/macros.h"
+#include "themis_state_msgs/msg/rosidl_typesupport_fastrtps_cpp__visibility_control.h"
+#include "themis_state_msgs/msg/detail/thread_state__struct.hpp"
+
+#ifndef _WIN32
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wunused-parameter"
+# ifdef __clang__
+#  pragma clang diagnostic ignored "-Wdeprecated-register"
+#  pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+# endif
+#endif
+#ifndef _WIN32
+# pragma GCC diagnostic pop
+#endif
+
+#include "fastcdr/Cdr.h"
+
+namespace themis_state_msgs
+{
+
+namespace msg
+{
+
+namespace typesupport_fastrtps_cpp
+{
+
+bool
+ROSIDL_TYPESUPPORT_FASTRTPS_CPP_PUBLIC_themis_state_msgs
+cdr_serialize(
+  const themis_state_msgs::msg::ThreadState & ros_message,
+  eprosima::fastcdr::Cdr & cdr);
+
+bool
+ROSIDL_TYPESUPPORT_FASTRTPS_CPP_PUBLIC_themis_state_msgs
+cdr_deserialize(
+  eprosima::fastcdr::Cdr & cdr,
+  themis_state_msgs::msg::ThreadState & ros_message);
+
+size_t
+ROSIDL_TYPESUPPORT_FASTRTPS_CPP_PUBLIC_themis_state_msgs
+get_serialized_size(
+  const themis_state_msgs::msg::ThreadState & ros_message,
+  size_t current_alignment);
+
+size_t
+ROSIDL_TYPESUPPORT_FASTRTPS_CPP_PUBLIC_themis_state_msgs
+max_serialized_size_ThreadState(
+  bool & full_bounded,
+  bool & is_plain,
+  size_t current_alignment);
+
+}  // namespace typesupport_fastrtps_cpp
+
+}  // namespace msg
+
+}  // namespace themis_state_msgs
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+ROSIDL_TYPESUPPORT_FASTRTPS_CPP_PUBLIC_themis_state_msgs
+const rosidl_message_type_support_t *
+  ROSIDL_TYPESUPPORT_INTERFACE__MESSAGE_SYMBOL_NAME(rosidl_typesupport_fastrtps_cpp, themis_state_msgs, msg, ThreadState)();
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // THEMIS_STATE_MSGS__MSG__DETAIL__THREAD_STATE__ROSIDL_TYPESUPPORT_FASTRTPS_CPP_HPP_

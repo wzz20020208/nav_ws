@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+import sys
+from keyboard_vel_controller.keyboard_vel_controller_node import main
+
+if __name__ == '__main__':
+    sys.exit(main())

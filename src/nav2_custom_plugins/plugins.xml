@@ -1,0 +1,42 @@
+<library path="nav2_custom_plugins_core">
+  <class name="nav2_custom_plugins/MPCController"
+         type="nav2_custom_plugins::MPCController"
+         base_class_type="nav2_core::Controller">
+    <description>
+      自定义的模型预测控制(MPC)局部路径规划器插件。
+    </description>
+  </class>
+
+  <class name="nav2_custom_plugins/MPPIController"
+         type="nav2_custom_plugins::MPPIController"
+         base_class_type="nav2_core::Controller">
+    <description>
+      MPPI (Model Predictive Path Integral Control) 局部路径规划器插件。
+      基于蒙特卡洛采样的最优控制算法，适用于全方向移动机器人。
+    </description>
+  </class>
+
+  <class name="nav2_custom_plugins/AdaptiveProgressChecker"
+         type="nav2_custom_plugins::AdaptiveProgressChecker"
+         base_class_type="nav2_core::ProgressChecker">
+    <description>
+      振荡感知 + 距离自适应的进度检测器。
+      在标准位移/旋转检测基础上，增加振荡检测和渐进收紧的半径阈值，
+      更精确地判断机器人是否真的卡死。
+    </description>
+  </class>
+
+</library>
+
+<library path="nav2_custom_plugins_gpu">
+  <class name="nav2_custom_plugins/MPPIGPUController"
+         type="nav2_custom_plugins::MPPIGPUController"
+         base_class_type="nav2_core::Controller">
+    <description>
+      GPU 加速版 MPPI (Model Predictive Path Integral Control) 局部路径规划器插件。
+      将1000条轨迹的并行采样、前向预测和代价评估卸载到 CUDA GPU 上执行。
+      适用于 NVIDIA Jetson / 独立 GPU 等硬件平台，显著降低 MPPI 计算延迟。
+      使用方式: plugin: "nav2_custom_plugins/MPPIGPUController"
+    </description>
+  </class>
+</library>

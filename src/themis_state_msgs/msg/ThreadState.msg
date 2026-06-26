@@ -1,0 +1,15 @@
+#ThreadState msg
+int8 bear_right_leg
+int8 bear_left_leg
+int8 bear_right_arm
+int8 bear_left_arm
+int8 bear_head
+int8 dxl_right_hand
+int8 dxl_left_hand
+int8 sense
+int8 estimation
+int8 control
+int8 locomotion
+int8 command
+int8 data
+int8 posture

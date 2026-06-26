@@ -1,0 +1,12 @@
+// generated from rosidl_generator_cpp/resource/idl.hpp.em
+// generated code does not contain a copyright notice
+
+#ifndef THEMIS_STATE_MSGS__MSG__FOOT_HPP_
+#define THEMIS_STATE_MSGS__MSG__FOOT_HPP_
+
+#include "themis_state_msgs/msg/detail/foot__struct.hpp"
+#include "themis_state_msgs/msg/detail/foot__builder.hpp"
+#include "themis_state_msgs/msg/detail/foot__traits.hpp"
+#include "themis_state_msgs/msg/detail/foot__type_support.hpp"
+
+#endif  // THEMIS_STATE_MSGS__MSG__FOOT_HPP_

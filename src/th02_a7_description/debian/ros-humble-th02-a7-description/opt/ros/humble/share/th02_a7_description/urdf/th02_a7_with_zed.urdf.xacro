@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<robot name="TH02-A7_ZED" xmlns:xacro="http://wiki.ros.org/xacro">
+  <xacro:property name="M_PI"     value="3.1415926535897931" />
+  <xacro:include filename="$(find th02_a7_description)/urdf/TH02-A7.urdf" />
+
+
+  <xacro:include filename="$(find th02_a7_description)/urdf_camera/include/materials.urdf.xacro" />
+  <xacro:include filename="$(find th02_a7_description)/urdf_camera/zed2i_macro.urdf.xacro" />
+  <xacro:include filename="$(find th02_a7_description)/urdf_camera/zedxm_macro.urdf.xacro" />
+
+
+  <xacro:zedxm_camera name="zedxm" model="zedxm" parent="BASE_LINK">
+    <origin xyz="0.0334 0.0 0.01613" rpy="0 0.8727 0"/>
+  </xacro:zedxm_camera>
+
+  <xacro:zed2i_camera name="zed2i" model="zed2i" parent="HEAD">
+    <origin xyz="0.058 0.07 0.0" rpy="-${M_PI/2} 0 0"/>
+  </xacro:zed2i_camera>
+
+</robot>

@@ -1,0 +1,42 @@
+file(REMOVE_RECURSE
+  "../rosidl_generator_py/themis_state_msgs/_themis_state_msgs_s.ep.rosidl_typesupport_c.c"
+  "../rosidl_generator_py/themis_state_msgs/_themis_state_msgs_s.ep.rosidl_typesupport_fastrtps_c.c"
+  "../rosidl_generator_py/themis_state_msgs/_themis_state_msgs_s.ep.rosidl_typesupport_introspection_c.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/__init__.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_base_state.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_base_state_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_battery_state.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_battery_state_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_array.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_array_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_state.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_state_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_temperature.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_bear_temperature_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_detected_object.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_detected_object_array.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_detected_object_array_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_detected_object_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot_array.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot_array_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot_print_array.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot_print_array_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_foot_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_joint_array.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_joint_array_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_principal_axes.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_principal_axes_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_selected_object.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_selected_object_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_th_joint_state.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_th_joint_state_s.c"
+  "../rosidl_generator_py/themis_state_msgs/msg/_thread_state.py"
+  "../rosidl_generator_py/themis_state_msgs/msg/_thread_state_s.c"
+  "CMakeFiles/themis_state_msgs__py"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang )
+  include(CMakeFiles/themis_state_msgs__py.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

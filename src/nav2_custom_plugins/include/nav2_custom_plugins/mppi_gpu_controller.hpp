@@ -1,0 +1,266 @@
+#ifndef NAV2_CUSTOM_PLUGINS__MPPI_GPU_CONTROLLER_HPP_
+#define NAV2_CUSTOM_PLUGINS__MPPI_GPU_CONTROLLER_HPP_
+
+#include <string>
+#include <memory>
+#include <vector>
+#include <random>
+
+#include "nav2_core/controller.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "pluginlib/class_list_macros.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "nav_msgs/msg/path.hpp"
+#include "nav2_costmap_2d/costmap_2d_ros.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
+
+namespace nav2_custom_plugins
+{
+
+/// 单帧统计数据，用于运行时性能分析与参数调优
+struct StatsFrame
+{
+  int frame;                       // 帧序号
+  double time_s;                   // 自首帧起的相对时间 (s)
+  double vx, vy, omega;            // EMA 平滑后的输出控制量
+  double vx_raw, vy_raw, omega_raw;// EMA 平滑前的原始 MPPI 输出
+  double cross_track_err;          // 到全局路径的横向误差 (m)
+  double heading_err;              // 机器人朝向与路径方向的偏差 (rad)
+  double dist_to_goal;             // 到前瞻点的距离 (m)
+  bool mutation_vx, mutation_vy, mutation_w; // 本帧是否发生突变
+  float best_cost;                 // 最优轨迹代价
+};
+
+/**
+ * @class MPPIGPUController
+ * @brief GPU 加速的 MPPI 控制器
+ *
+ * 将 MPPI 控制器的采样、轨迹滚动和代价计算卸载到 GPU 上并行执行。
+ * CUDA 线程一对一映射到采样轨迹，实现大规模并行加速。
+ * 在 Jetson Orin 等嵌入式 GPU 平台上可获得显著性能提升。
+ */
+class MPPIGPUController : public nav2_core::Controller
+{
+public:
+  MPPIGPUController() = default;
+  ~MPPIGPUController() override = default;
+
+  void configure(
+    const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
+    std::string name, std::shared_ptr<tf2_ros::Buffer> tf,
+    std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) override;
+
+  void cleanup() override;
+  void activate() override;
+  void deactivate() override;
+
+  void setPlan(const nav_msgs::msg::Path & path) override;
+
+  geometry_msgs::msg::TwistStamped computeVelocityCommands(
+    const geometry_msgs::msg::PoseStamped & pose,
+    const geometry_msgs::msg::Twist & velocity,
+    nav2_core::GoalChecker * goal_checker) override;
+
+  void setSpeedLimit(const double & speed_limit, const bool & percentage) override;
+
+private:
+  rclcpp_lifecycle::LifecycleNode::WeakPtr node_;
+  std::shared_ptr<tf2_ros::Buffer> tf_;
+  std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
+  nav_msgs::msg::Path global_plan_;
+  std::string plugin_name_;
+
+  // 全局代价地图订阅（map 帧，全图尺寸，补充局部代价地图覆盖不到的区域）
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr global_costmap_sub_;
+  nav_msgs::msg::OccupancyGrid::SharedPtr latest_global_costmap_;
+  bool use_global_costmap_ = true;
+  std::string global_costmap_topic_ = "/global_costmap/costmap";
+
+  // MPPI 参数
+  int num_samples_ = 1000;
+  int prediction_horizon_ = 15;
+  double dt_ = 0.3;
+  double max_v_ = 2.0;
+  double min_v_ = -2.0;
+  double max_vy_ = 2.0;
+  double max_w_ = 0.5;
+  // 各维度采样噪声下限 (替代单一 noise_scale_floor_, 可独立设置)
+  double noise_scale_floor_vx_ = 0.15; // vx 噪声尺度下限 (0~1)
+  double noise_scale_floor_vy_ = 0.15; // vy 噪声尺度下限 (0~1)
+  double noise_scale_floor_w_  = 0.15; // omega 噪声尺度下限 (0~1)
+  // 纯角速度采样: 部分轨迹先原地旋转对准路径，再平移前进
+  double pure_rotation_ratio_ = 0.15;   // 纯旋转轨迹占比 (0~1)
+  int pure_rotation_steps_ = 3;         // 纯旋转持续步数
+  double pure_rotation_w_boost_ = 1.5;  // 旋转步 omega 噪声增强倍数
+  double action_std_v_ = 0.2;
+  double action_std_vy_ = 0.15;
+  double action_std_w_ = 0.2;
+  double lambda_ = 50.0;
+  double costmap_weight_ = 10.0;
+  double path_attraction_weight_ = 1.0;
+  double lookahead_distance_ = 1.0;
+  double lookahead_time_ = 2.0;
+  double min_lookahead_dist_ = 2.0;
+  double guidance_weight_ = 0.3;  // 路径引导权重: 0=完全跟随base, 1=完全锚定路径
+  double cross_track_noise_scale_ = 0.3;
+  double noise_decay_rate_ = 0.7;
+  double vel_direction_weight_ = 0.3;
+  double speed_reward_weight_ = 2.0;
+  double heading_weight_ = 0.5;      // 朝向目标奖励权重
+  double lateral_guidance_scale_ = 0.2; // 横向 guidance 缩放 (0~1)，越小越抑制侧移
+  double turn_lateral_boost_ = 4.0;       // 转弯横向增强: 急弯时 vy 放大倍数 (0=无增强, 4=急弯×5)
+  double ema_alpha_ = 0.2;               // 输出 EMA 平滑系数: 0=完全冻结, 1=无平滑
+  bool enable_ema_ = true;               // 是否启用 EMA 输出平滑，关闭则直接输出原始 MPPI 控制量
+  double lookahead_proximity_weight_ = 5.0;  // 前瞻点接近奖励权重，鼓励进入中等代价区域
+  double lookahead_proximity_decay_ = 0.3;   // 前瞻点接近奖励衰减距离 (m)，控制奖励范围
+  double lookahead_theta_ = 0.0;              // 全局持久的前瞻点推荐朝向 (rad)，跨路径重规划保持
+  double prev_lookahead_theta_ = 0.0;          // 上一帧的 lookahead_theta_（用于变化率限制）
+  bool has_prev_lookahead_theta_ = false;      // 是否有上一帧朝向数据
+  double lookahead_theta_rate_ = 0.5;          // 最大朝向变化率 (rad/s)，每帧限幅 dt*(此值)，默认≈28°/s
+  rclcpp::Time last_theta_update_time_;  // 上一帧朝向更新时间 (默认构造为 0)
+  double exploration_decay_start_ = 3.0;   // 探索衰减起始距离 (m), >此距离探索范围=100%
+  double exploration_decay_end_ = 0.5;     // 探索衰减结束距离 (m), <此距离探索范围=floor
+  double exploration_decay_floor_ = 0.3;   // 探索衰减下限 (0~1), 最小保留比例
+  double spatial_decay_weight_ = 0.5;      // 空间衰减权重: 0=纯时间步, 1=纯空间距离
+  double footprint_front_ = 0.3;   // 碰撞箱前向半尺寸 (m)
+  double footprint_back_ = 0.3;    // 碰撞箱后向半尺寸 (m)
+  double footprint_left_ = 0.4;    // 碰撞箱左向半尺寸 (m)
+  double footprint_right_ = 0.4;   // 碰撞箱右向半尺寸 (m)
+  double terminal_angle_dist_ = 0.10;      // 终端角度对准距离 (m)，<此距离退化 MPPI → 纯角度追踪
+  double terminal_angle_kp_ = 1.5;         // 终端角度 P 控制器增益
+  double terminal_angle_tolerance_ = 0.07; // 终端角度容忍度 (rad), ≈4°, 留裕量给 5° goal checker
+  double cost_vy_threshold_ = 0.0;         // vy 代价视角阈值 (m/s), 0=禁用, <此速度的 vy 被抬升至阈值
+
+  // ── 代价函数内部参数（原硬编码常量，现暴露为可配置参数） ──
+  double terminal_dist_weight_ = 2.0;      // ⑥ 终端距离代价权重
+  double path_length_weight_ = 0.2;        // ⑤ 路径长度代价权重
+  double goal_attraction_weight_ = 0.3;    // ① 目标渐进吸引基础权重
+  double path_follow_scale_increment_ = 1.2; // ③ 路径吸引时间递增因子
+  double goal_soft_radius_ = 0.4;          // 平滑到达阻尼半径 (m)
+  double base_speed_floor_ratio_ = 0.55;   // 保底速度比例 (防止 base 序列塌缩)
+  double turn_lateral_max_boost_ = 6.0;    // 转弯横向最大放大倍数上限
+  double footprint_sample_spacing_ = 0.08; // 足迹碰撞检测采样间距 (m)
+  double rear_obstacle_cost_ = 160.0;      // 后方隐形障碍代价地板 (0~255), 0=禁用, 160=轻~中度
+
+  // ── 分层规划: 全局轨迹直接预测到终点 ──
+  double global_trajectory_ratio_ = 0.2;    // 全局轨迹占比 (0~1), 0=纯局部, 1=纯全局
+  int global_horizon_ = 30;                 // 全局轨迹预测步数最大值
+  double final_goal_x_ = 0.0;               // 最终目标点 x（每帧更新）
+  double final_goal_y_ = 0.0;               // 最终目标点 y
+  double final_goal_yaw_ = 0.0;             // 最终目标姿态
+
+  // ── 前瞻点 KP 减速 ──
+  // 读取代价地图在前瞻点处的代价，代价越高速度越低
+  // scale = 1 - cost/254 * (1 - kp)
+  double lookahead_kp_ = 0.2;  // 前瞻点遇到致命障碍物时的最低速度比例 (0~1)
+
+  // ── 朝向偏差限速 ──
+  // 当机器人朝向与目标方向偏差超过阈值时，限制矢量速度
+  bool enable_heading_speed_limit_ = true;   // 是否启用朝向偏差限速
+  double heading_misalign_threshold_ = M_PI_2; // 偏差阈值 (rad), 默认 90°
+  double heading_misalign_max_speed_ = 0.1;    // 超阈值时的最大矢量速度 (m/s)
+
+  static constexpr int MAX_PATH_POINTS = 30;
+
+  // 最优控制序列记忆（滚动窗口）
+  std::vector<double> optimal_vx_seq_;
+  std::vector<double> optimal_vy_seq_;
+  std::vector<double> optimal_omega_seq_;
+  bool initialized_ = false;
+
+  // 上一帧最近路径点索引，用于增量搜索避免 closest_idx 跳变
+  int prev_closest_idx_ = 0;
+
+  // 上一帧前瞻点位置，用于到达推进检测
+  double prev_lookahead_x_ = 0.0;
+  double prev_lookahead_y_ = 0.0;
+  bool has_prev_lookahead_ = false;
+
+  // ── 终端角度对准（靠近目标时纯旋转对齐 goal yaw）──
+  bool terminal_angle_active_ = false;  // 终端对准已激活（带迟滞，防边界抖动）
+
+  // 横向偏好方向：打破对称障碍物的左右抉择困境
+  // -1.0 = 偏好左绕, 0.0 = 无偏好, +1.0 = 偏好右绕
+  // 每帧基于 costmap 分析更新，带迟滞避免振荡
+  double preferred_lateral_dir_ = 0.0;
+  bool enable_lateral_bias_ = true;  // 是否启用横向偏好分析
+
+  // ── 运行时统计数据采集 ──
+  bool enable_stats_ = false;
+  std::string stats_file_path_ = "/tmp/mppi_gpu_stats.csv";
+  std::vector<StatsFrame> stats_frames_;
+  double stats_start_time_ = 0.0;
+  int stats_frame_count_ = 0;
+  double prev_vx_raw_ = 0.0, prev_vy_raw_ = 0.0, prev_omega_raw_ = 0.0;
+  bool has_prev_stats_ = false;
+  double mutation_thresh_vx_ = 0.3;   // vx 突变阈值 (m/s)
+  double mutation_thresh_vy_ = 0.15;  // vy 突变阈值 (m/s)
+  double mutation_thresh_w_ = 0.3;    // omega 突变阈值 (rad/s)
+
+  // 输出 EMA 平滑状态（帧间低通滤波，抑制控制量跳变）
+  double ema_cmd_vx_ = 0.0;
+  double ema_cmd_vy_ = 0.0;
+  double ema_cmd_w_ = 0.0;
+  bool ema_initialized_ = false;
+
+  // 随机数生成器（噪声预生成）
+  std::mt19937 generator_;
+  std::normal_distribution<> dist_vx_;
+  std::normal_distribution<> dist_vy_;
+  std::normal_distribution<> dist_w_;
+
+  // GPU 缓冲区（持久分配，避免反复 cudaMalloc）
+  float *d_noise_vx_ = nullptr;
+  float *d_noise_vy_ = nullptr;
+  float *d_noise_w_ = nullptr;
+  float *d_base_vx_ = nullptr;
+  float *d_base_vy_ = nullptr;
+  float *d_base_w_ = nullptr;
+  float *d_costs_ = nullptr;
+  float *d_sampled_vx_ = nullptr;   // N × H: 每条采样轨迹每步的实际 vx
+  float *d_sampled_vy_ = nullptr;   // N × H: 每条采样轨迹每步的实际 vy
+  float *d_sampled_w_  = nullptr;   // N × H: 每条采样轨迹每步的实际 omega
+  float *d_result_seq_ = nullptr;   // H × 4: 每个 timestep 的 [vx, vy, w, weight_sum]
+  unsigned char *d_costmap_ = nullptr;
+  float *d_path_x_ = nullptr;
+  float *d_path_y_ = nullptr;
+  float *d_traj_x_ = nullptr;
+  float *d_traj_y_ = nullptr;
+  int costmap_w_ = 0;
+  int costmap_h_ = 0;
+  bool gpu_buffers_allocated_ = false;
+
+  void allocateGPUBuffers();
+  void freeGPUBuffers();
+
+  // 可视化发布者
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
+
+  void publishVisualization(
+    double robot_x, double robot_y, double robot_theta,
+    double target_x, double target_y,
+    const std::vector<float>& traj_data_x,
+    const std::vector<float>& traj_data_y,
+    int vis_samples,
+    int best_idx,
+    const std::string& frame_id);
+
+  /// 全局代价地图回调：缓存最新的 OccupancyGrid 消息
+  void globalCostmapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+
+  /// 记录一帧运行时统计数据（在 computeVelocityCommands 末尾调用）
+  void recordStatsFrame(double vx, double vy, double omega,
+                        double vx_raw, double vy_raw, double omega_raw,
+                        double cross_track_err, double heading_err,
+                        double dist_to_goal, float best_cost,
+                        double current_time);
+
+  /// 将累积的统计数据写入 CSV 文件（在 cleanup 中调用）
+  void writeStatsToFile();
+};
+
+}  // namespace nav2_custom_plugins
+
+#endif  // NAV2_CUSTOM_PLUGINS__MPPI_GPU_CONTROLLER_HPP_

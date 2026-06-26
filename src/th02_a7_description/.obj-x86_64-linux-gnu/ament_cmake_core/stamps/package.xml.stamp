@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>th02_a7_description</name>
+  <version>0.2.6</version>
+  <description>Robot description for TH02-A7</description>
+  <maintainer email="info@westwoodrobotics.io">Westwoodrobotics</maintainer>
+  <license>GPL-3.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

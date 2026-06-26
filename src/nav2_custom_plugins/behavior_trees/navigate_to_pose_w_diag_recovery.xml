@@ -1,0 +1,81 @@
+<!--
+  诊断驱动恢复行为树 (NavigateToPose)
+
+  基于标准 navigate_to_pose_w_replanning_and_recovery.xml，
+  将固定顺序的 RoundRobin recovery 替换为诊断驱动路由:
+
+    AdaptiveProgressChecker 发布 /progress_checker_diagnosis
+      → IsProgressDiagnosis BT 节点读取
+        → Fallback 路由到对应 recovery behavior:
+          · "oscillation" → Spin (旋转换方向)
+          · "retreating"  → BackUp (倒退)
+          · "timeout"     → ClearCostmap + Spin (清零+旋转)
+          · 兜底         → RoundRobin(Spin, Wait, BackUp)
+
+  使用方式:
+    bt_navigator:
+      ros__parameters:
+        default_nav_to_pose_bt_xml: /path/to/navigate_to_pose_w_diag_recovery.xml
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <!-- 诊断驱动 Recovery 子树 (替换标准 RoundRobin)               -->
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+
+        <Fallback name="DiagRecovery">
+
+          <!-- 振荡 → 旋转换方向 -->
+          <Sequence name="DiagOscillation">
+            <IsProgressDiagnosis expected="oscillation"/>
+            <Spin spin_dist="0.785"/>
+          </Sequence>
+
+          <!-- 退行/绕圈 → 倒退 -->
+          <Sequence name="DiagRetreating">
+            <IsProgressDiagnosis expected="retreating"/>
+            <BackUp backup_dist="0.50" backup_speed="0.10"/>
+          </Sequence>
+
+          <!-- 超时 → 清代价地图 + 旋转 -->
+          <Sequence name="DiagTimeout">
+            <IsProgressDiagnosis expected="timeout"/>
+            <Sequence name="ClearAndSpin">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              <Spin spin_dist="1.57"/>
+            </Sequence>
+          </Sequence>
+
+          <!-- 兜底: 传统 RoundRobin (诊断话题未发布或匹配失败时) -->
+          <RoundRobin name="RecoveryFallbackActions">
+            <Sequence name="ClearingActions">
+              <ClearEntireCostmap name="ClearLocalCostmap-Fallback" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Fallback" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+            <Spin spin_dist="1.57"/>
+            <Wait wait_duration="5"/>
+            <BackUp backup_dist="0.30" backup_speed="0.05"/>
+          </RoundRobin>
+
+        </Fallback>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

@@ -1,0 +1,166 @@
+# ============================================================
+# RTAB-Map 配置文件 — THEMIS (TH02-A7)
+# 模式: 点云 SLAM (subscribe_scan_cloud)
+# 里程计: 外部轮式里程计, 不使用视觉里程计
+# ============================================================
+# 使用方式:
+#   ros2 launch nav_launch themis_rtabmap.launch.py                        # 建图
+#   ros2 launch nav_launch themis_rtabmap.launch.py localization:=true     # 定位
+#   ros2 launch nav_launch themis_rtabmap.launch.py extra_args:=""         # 不清空旧地图
+# ============================================================
+#
+# 注意:
+#   - ros__parameters 下带 / 的参数为 RTAB-Map 核心参数, 通过 CLI args 注入
+#   - launch: 段定义话题订阅 & 坐标系, 由 launch.py 读取后传给 rtabmap_launch
+#   - 完整参数列表: https://github.com/introlab/rtabmap/wiki/Parameters
+# ============================================================
+
+/**:
+  rtabmap:
+    ros__parameters:
+
+      # ──────────────────────────────────────────────────────
+      # 配准策略
+      # ──────────────────────────────────────────────────────
+      # 策略: 0=ICP, 1=视觉, 2=视觉+ICP
+      Reg/Strategy: "1"
+      # 强制 3DoF (地面机器人: x, y, yaw)
+      Reg/Force3DoF: "true"
+
+      # ──────────────────────────────────────────────────────
+      # ICP 点云配准
+      # ──────────────────────────────────────────────────────
+      # 点到平面 ICP (比点到点精度高, 需法向量)
+      Icp/PointToPlane: "false"
+      # 最大迭代次数
+      Icp/Iterations: 30
+      # 对应点最大搜索距离 (米)
+      Icp/MaxCorrespondenceDistance: 1.0
+      # 有效对应点比例下限
+      Icp/CorrespondenceRatio: 0.1
+      # 收敛阈值 (平移)
+      Icp/Epsilon: 0.001
+      # 外点比例 (鲁棒估计)
+      Icp/OutlierRatio: 0.7
+      # 输入点云降采样体素 (米, 0=不降采样)
+      Icp/VoxelSize: 0.1
+      # 降采样策略: 0=体素网格, 1=随机, 2=八叉树
+      Icp/DownsamplingStep: 1
+      # 最大允许平移 (米, 用于剔除异常匹配帧)
+      Icp/MaxTranslation: 2.0
+      # 最大允许旋转 (弧度)
+      Icp/MaxRotation: 1.0
+
+      # ──────────────────────────────────────────────────────
+      # 2D 占据栅格地图
+      # ──────────────────────────────────────────────────────
+      # false=2D栅格, true=3D点云
+      Grid/3D: "false"
+      # 射线投射填充空白区域
+      Grid/RayTracing: "true"
+      # 有效范围 (米)
+      Grid/RangeMax: 5.0
+      Grid/RangeMin: 0.3
+      # 地面高度阈值 (米, 超过即为障碍物)
+      Grid/MaxGroundHeight: 0.1
+      # 障碍物最大高度 (米, 超过忽略)
+      Grid/MaxObstacleHeight: 2.0
+      # 栅格分辨率 (米/格)
+      Grid/CellSize: 0.05
+      # 机器人投影半径 (米)
+      Grid/FootprintRadius: 0.35
+      # 地面分割: false=高度直通滤波, true=法向量
+      Grid/NormalsSegmentation: "true"
+      # 地面点视为障碍物
+      Grid/GroundIsObstacle: "false"
+      # 每次更新全量刷新局部栅格
+      Grid/FullUpdate: "false"
+      # 栅格更新误差阈值
+      Grid/UpdateError: 0.01
+      # 噪声过滤: 最小聚类点数
+      Grid/NoiseFilteringMinPoints: 5
+      # 噪声过滤: 聚类半径 (米)
+      Grid/ClusterRadiusMin: 0.1
+      # 是否基于深度图 (点云模式下自动处理)
+      Grid/FromDepth: "false"
+      # 占据栅格预膨胀距离 (米)
+      Grid/PreVoxelFiltering: "true"
+      Grid/PreVoxelFilteringSize: 0.05
+
+      # ──────────────────────────────────────────────────────
+      # 回环检测
+      # ──────────────────────────────────────────────────────
+      # 短期记忆窗口大小 (关键帧数)
+      Mem/STMSize: 30
+      # 基于空间距离筛选回环候选
+      RGBD/ProximityBySpace: "true"
+      # 回环搜索局部半径 (米)
+      RGBD/LocalRadius: 5.0
+      # 局部回环检测半径 (米)
+      RGBD/LocalLoopDetectionRadius: 5.0
+      # 回环最大图深度
+      RGBD/ProximityMaxGraphDepth: 5
+      RGBD/LocalLoopDetectionMaxGraphDepth: 5
+      # 不使用 GPS 辅助回环
+      Mem/UseGPSForLoopClosureCandidate: "false"
+
+      # ──────────────────────────────────────────────────────
+      # 图优化
+      # ──────────────────────────────────────────────────────
+      # 优化器: 0=TORO, 1=g2o, 2=GTSAM
+      Optimizer/Strategy: "1"
+      # 迭代次数
+      Optimizer/Iterations: 20
+      # 鲁棒核函数 (抗异常约束边)
+      Optimizer/Robust: "true"
+      # 禁用 IMU 重力约束 (2D 地面机器人)
+      Optimizer/GravitySigma: "0"
+      # 位姿图边信息矩阵方差
+      Optimizer/Variance: "1.0"
+
+      # ──────────────────────────────────────────────────────
+      # 内存 / 关键帧管理
+      # ──────────────────────────────────────────────────────
+      # 注: Mem/IncrementalMemory 与 Mem/InitWMWithAllNodes
+      #     由 rtabmap.launch.py 根据 localization:=true/false 自动切换
+      # 关键帧生成地图数据
+      Mem/GenerateMap: "true"
+      # 不使用里程计重力方向约束
+      Mem/UseOdomGravity: "false"
+      # 坏回环比率阈值 (超过触发恢复)
+      Mem/BadSignRatio: 0.3
+      # 建图时最小关键帧间隔 (米)
+      RGBD/LinearUpdate: 0.1
+      # 建图时最小关键帧角度间隔 (弧度)
+      RGBD/AngularUpdate: 0.1
+      # 关键帧创建策略: 0=时间+运动, 1=仅运动
+      RGBD/CreateOccupancyGrid: "true"
+
+      # ──────────────────────────────────────────────────────
+      # 同步
+      # ──────────────────────────────────────────────────────
+      # 话题队列大小
+      topic_queue_size: 10
+      sync_queue_size: 10
+
+      # ──────────────────────────────────────────────────────
+      # QoS (0=系统默认, 1=Reliable, 2=Best Effort)
+      # ──────────────────────────────────────────────────────
+      qos: 1
+      qos_scan: 2
+      qos_odom: 1
+
+  # ──────────────────────────────────────────────────────
+  # 话题 & 坐标系 (由 launch.py 读取, 非 RTAB-Map 核心参数)
+  # ──────────────────────────────────────────────────────
+  launch:
+    # 输入点云话题 (LiDAR / RGB-D 点云)
+    scan_cloud_topic: "/chest_camera/points_sparse"
+    # 外部里程计话题 (轮式里程计)
+    odom_topic: "/odom"
+    # 机器人基座坐标系
+    frame_id: "BASE_LINK"
+    # 里程计坐标系
+    odom_frame_id: "odom"
+    # 地图坐标系
+    map_frame_id: "map"

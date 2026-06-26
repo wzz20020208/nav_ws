@@ -1,0 +1,51 @@
+// generated from rosidl_generator_c/resource/idl__struct.h.em
+// with input from themis_state_msgs:msg/JointArray.idl
+// generated code does not contain a copyright notice
+
+#ifndef THEMIS_STATE_MSGS__MSG__DETAIL__JOINT_ARRAY__STRUCT_H_
+#define THEMIS_STATE_MSGS__MSG__DETAIL__JOINT_ARRAY__STRUCT_H_
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+
+// Constants defined in the message
+
+// Include directives for member types
+// Member 'position'
+// Member 'velocity'
+// Member 'torque'
+#include "rosidl_runtime_c/primitives_sequence.h"
+
+/// Struct defined in msg/JointArray in the package themis_state_msgs.
+/**
+  * JointArray.msg
+ */
+typedef struct themis_state_msgs__msg__JointArray
+{
+  rosidl_runtime_c__float__Sequence position;
+  rosidl_runtime_c__float__Sequence velocity;
+  rosidl_runtime_c__float__Sequence torque;
+} themis_state_msgs__msg__JointArray;
+
+// Struct for a sequence of themis_state_msgs__msg__JointArray.
+typedef struct themis_state_msgs__msg__JointArray__Sequence
+{
+  themis_state_msgs__msg__JointArray * data;
+  /// The number of valid items in data
+  size_t size;
+  /// The number of allocated items in data
+  size_t capacity;
+} themis_state_msgs__msg__JointArray__Sequence;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // THEMIS_STATE_MSGS__MSG__DETAIL__JOINT_ARRAY__STRUCT_H_
