@@ -15,6 +15,7 @@
 #include "nav2_costmap_2d/costmap_2d_ros.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+#include "nav2_custom_plugins/mppi_gpu_logger.hpp"
 
 namespace nav2_custom_plugins
 {
@@ -97,24 +98,26 @@ private:
   double action_std_v_ = 0.2;
   double action_std_vy_ = 0.15;
   double action_std_w_ = 0.2;
+  // ── NLN 混合采样 (Log-MPPI) ──
+  double nln_ratio_ = 0.3;    // 对数正态采样占比 (0=纯高斯, 1=纯对数正态)
+  double nln_sigma_mult_ = 3.0; // 对数正态 sigma 倍数 (越大尾越重)
   double lambda_ = 50.0;
-  double costmap_weight_ = 10.0;
-  double path_attraction_weight_ = 1.0;
+
+  // ── 三组件代价权重 (仅此三个可调，消除数据竞争) ──
+  double obstacle_weight_ = 40.0;   // 障碍物代价: 越高越保守
+  double heading_weight_ = 5.0;     // 朝向代价:   越高越注重对齐
+  double time_weight_ = 1.0;        // 耗时代价:   越高越快到达目标
+
   double lookahead_distance_ = 1.0;
   double lookahead_time_ = 2.0;
   double min_lookahead_dist_ = 2.0;
   double guidance_weight_ = 0.3;  // 路径引导权重: 0=完全跟随base, 1=完全锚定路径
   double cross_track_noise_scale_ = 0.3;
   double noise_decay_rate_ = 0.7;
-  double vel_direction_weight_ = 0.3;
-  double speed_reward_weight_ = 2.0;
-  double heading_weight_ = 0.5;      // 朝向目标奖励权重
   double lateral_guidance_scale_ = 0.2; // 横向 guidance 缩放 (0~1)，越小越抑制侧移
   double turn_lateral_boost_ = 4.0;       // 转弯横向增强: 急弯时 vy 放大倍数 (0=无增强, 4=急弯×5)
   double ema_alpha_ = 0.2;               // 输出 EMA 平滑系数: 0=完全冻结, 1=无平滑
   bool enable_ema_ = true;               // 是否启用 EMA 输出平滑，关闭则直接输出原始 MPPI 控制量
-  double lookahead_proximity_weight_ = 5.0;  // 前瞻点接近奖励权重，鼓励进入中等代价区域
-  double lookahead_proximity_decay_ = 0.3;   // 前瞻点接近奖励衰减距离 (m)，控制奖励范围
   double lookahead_theta_ = 0.0;              // 全局持久的前瞻点推荐朝向 (rad)，跨路径重规划保持
   double prev_lookahead_theta_ = 0.0;          // 上一帧的 lookahead_theta_（用于变化率限制）
   bool has_prev_lookahead_theta_ = false;      // 是否有上一帧朝向数据
@@ -131,18 +134,15 @@ private:
   double terminal_angle_dist_ = 0.10;      // 终端角度对准距离 (m)，<此距离退化 MPPI → 纯角度追踪
   double terminal_angle_kp_ = 1.5;         // 终端角度 P 控制器增益
   double terminal_angle_tolerance_ = 0.07; // 终端角度容忍度 (rad), ≈4°, 留裕量给 5° goal checker
-  double cost_vy_threshold_ = 0.0;         // vy 代价视角阈值 (m/s), 0=禁用, <此速度的 vy 被抬升至阈值
-
-  // ── 代价函数内部参数（原硬编码常量，现暴露为可配置参数） ──
-  double terminal_dist_weight_ = 2.0;      // ⑥ 终端距离代价权重
-  double path_length_weight_ = 0.2;        // ⑤ 路径长度代价权重
-  double goal_attraction_weight_ = 0.3;    // ① 目标渐进吸引基础权重
-  double path_follow_scale_increment_ = 1.2; // ③ 路径吸引时间递增因子
-  double goal_soft_radius_ = 0.4;          // 平滑到达阻尼半径 (m)
-  double base_speed_floor_ratio_ = 0.55;   // 保底速度比例 (防止 base 序列塌缩)
-  double turn_lateral_max_boost_ = 6.0;    // 转弯横向最大放大倍数上限
+  // ── 障碍物代价内部参数 ──
+  double rear_obstacle_cost_ = 160.0;      // 后方隐形障碍代价地板 (0~255), 0=禁用
   double footprint_sample_spacing_ = 0.08; // 足迹碰撞检测采样间距 (m)
-  double rear_obstacle_cost_ = 160.0;      // 后方隐形障碍代价地板 (0~255), 0=禁用, 160=轻~中度
+
+  // ── 时步折扣 ──
+  double cost_discount_ = 0.9;            // 代价时序折扣 γ, step t 权重=γ^t
+
+  // ── 行为参数 (非代价权重) ──
+  double turn_lateral_max_boost_ = 6.0;    // 转弯横向最大放大倍数上限
 
   // ── 分层规划: 全局轨迹直接预测到终点 ──
   double global_trajectory_ratio_ = 0.2;    // 全局轨迹占比 (0~1), 0=纯局部, 1=纯全局
@@ -210,6 +210,12 @@ private:
   std::normal_distribution<> dist_vx_;
   std::normal_distribution<> dist_vy_;
   std::normal_distribution<> dist_w_;
+  // NLN 混合采样: 对数正态分布 + 均匀分布 (符号)
+  std::lognormal_distribution<> dist_ln_vx_;
+  std::lognormal_distribution<> dist_ln_vy_;
+  std::lognormal_distribution<> dist_ln_w_;
+  std::uniform_real_distribution<> dist_sign_{0.0, 1.0};
+  std::uniform_real_distribution<> dist_mix_{0.0, 1.0};
 
   // GPU 缓冲区（持久分配，避免反复 cudaMalloc）
   float *d_noise_vx_ = nullptr;
@@ -259,6 +265,17 @@ private:
 
   /// 将累积的统计数据写入 CSV 文件（在 cleanup 中调用）
   void writeStatsToFile();
+
+  // ── 文件日志 ──
+  MPPIGPULogger logger_;
+  bool enable_file_log_ = true;
+  std::string log_file_path_ = "/tmp/mppi_gpu_controller.log";
+
+  // ── 停滞检测 ──
+  double stall_speed_threshold_ = 0.05;
+  double stall_report_interval_ = 2.0;
+  double stall_start_time_ = -1.0;
+  double last_stall_report_time_ = -1.0;
 };
 
 }  // namespace nav2_custom_plugins
