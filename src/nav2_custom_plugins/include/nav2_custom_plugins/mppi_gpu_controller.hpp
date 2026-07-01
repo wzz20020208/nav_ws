@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include <random>
+#include <cstdint>
 
 #include "nav2_core/controller.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -32,6 +33,24 @@ struct StatsFrame
   double dist_to_goal;             // 到前瞻点的距离 (m)
   bool mutation_vx, mutation_vy, mutation_w; // 本帧是否发生突变
   float best_cost;                 // 最优轨迹代价
+};
+
+/// 控制器状态机 (优先级: TERMINAL > LATERAL > HEADING > NARROW > NORMAL)
+enum class ControllerState : uint8_t
+{
+  NORMAL = 0,
+  HEADING_MISALIGN = 1,
+  NARROW_PASSAGE = 2,
+  TERMINAL_ALIGN = 3,
+  LATERAL_SHIFT = 4
+};
+
+/// 窄道子状态
+enum class NarrowSubState : uint8_t
+{
+  SEARCH_BOX = 0,
+  ALIGN,
+  ADVANCE
 };
 
 /**
@@ -186,6 +205,32 @@ private:
   // 每帧基于 costmap 分析更新，带迟滞避免振荡
   double preferred_lateral_dir_ = 0.0;
   bool enable_lateral_bias_ = true;  // 是否启用横向偏好分析
+
+  // ── 状态机 ──
+  ControllerState state_ = ControllerState::NORMAL;
+  NarrowSubState narrow_sub_state_ = NarrowSubState::SEARCH_BOX;
+
+  // 窄道检测: 前瞻点世界坐标不移动 + 附近有障碍
+  double prev_lh_wx_ = 0.0, prev_lh_wy_ = 0.0;
+  bool   has_prev_lh_ = false;
+  double lookahead_stuck_start_ = -1.0;
+  double lookahead_stuck_timeout_ = 1.0;
+
+  // 窄道执行
+  double narrow_box_target_x_ = 0.0, narrow_box_target_y_ = 0.0, narrow_box_target_theta_ = 0.0;
+  bool   narrow_box_found_ = false, narrow_box_locked_ = false;
+  double narrow_entry_cost_ = 1e9;
+
+  // 横向移动
+  bool   lateral_locked_ = false;
+  double lateral_target_x_ = 0.0, lateral_target_y_ = 0.0, lateral_lock_start_ = 0.0;
+
+  // 终端对齐
+  bool   terminal_locked_ = false;
+
+  ControllerState determineState(
+    double lh_wx, double lh_wy, double goal_wx, double goal_wy,
+    bool near_goal, double heading_err, bool at_end, bool obs_nearby, double now);
 
   // ── 运行时统计数据采集 ──
   bool enable_stats_ = false;

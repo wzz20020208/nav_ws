@@ -77,36 +77,33 @@ controller_server:
       plugin: "nav2_custom_plugins/MPPIGPUController"
 
       # ╔══════════════════════════════════════════════════════════════════╗
-      # ║              MPPI GPU 控制器 — 三组件解耦代价架构                ║
+      # ║       MPPI GPU 控制器 — 移植自 nav2_mppi_controller              ║
       # ╠══════════════════════════════════════════════════════════════════╣
       # ║                                                                  ║
-      # ║  total_cost = obstacle_weight × obstacle_cost                    ║
-      # ║             + heading_weight   × heading_cost                    ║
-      # ║             + time_weight      × time_cost                       ║
+      # ║  total_cost = obstacle_weight  × ObstaclesCritic                ║
+      # ║             + tracking_weight  × (PathAlign + PathAngle         ║
+      # ║                                  + GoalAngle)                   ║
+      # ║             + progress_weight  × (PreferForward + GoalCritic)   ║
       # ║                                                                  ║
-      # ║  三个权重独立调节，消除数据竞争:                                  ║
-      # ║    obstacle_weight ↑ → 更保守, 远离障碍物                        ║
-      # ║    heading_weight   ↑ → 更注重朝向对齐                           ║
-      # ║    time_weight      ↑ → 更快到达目标 (速度+效率)                  ║
-      # ║                                                                  ║
-      # ║  已删除的冗余代价项:                                              ║     ║
+      # ║  参考: nav2 MPPI critics (Williams 2017 MPPI)                    ║
+      # ║    obstacle_weight ↑ → 更保守, 远离障碍                          ║
+      # ║    tracking_weight ↑ → 更贴路径, 朝向对齐                        ║
+      # ║    progress_weight ↑ → 更快/更高效到达目标                        ║
       # ╚══════════════════════════════════════════════════════════════════╝
 
       # ════════════════════════════════════════════════════════════════
-      # 三组件代价权重 (仅此三个可调，相互独立)
+      # 三组件代价权重
       # ════════════════════════════════════════════════════════════════
-      obstacle_weight: 80.0        # 障碍物代价. ↑=更保守 (安全第一, 必须远大于其他两项)
-      heading_weight: 20.0         # 朝向代价.   ↑=更注重对齐路径/目标方向
-      time_weight: 5.0             # 耗时代价.   ↑=更快到达 (速度+效率)
+      obstacle_weight: 20.0        # ObstaclesCritic: 碰撞检测 (norm^4)
+      tracking_weight: 20.0        # PathAlignCritic + PathAngleCritic + GoalAngleCritic
+      progress_weight: 5.0         # PreferForwardCritic + GoalCritic
 
       # ════════════════════════════════════════════════════════════════
       # 预测时空 (dt × horizon × max_v = 有效预测距离)
       # ════════════════════════════════════════════════════════════════
-      #   当前: 0.3 × 12 × 0.40 = 1.44m 预测距离, 前瞻点 1.0m
-      #   ⚠ 增大 max_v → 需同步增大 horizon 或减小 dt,
-      #      保持预测距离 ≥ 2× min_lookahead_dist
+      #   dt×H×max_v = 0.3×8×0.4 = 0.96m, 前瞻点 0.4m
       num_samples: 3000
-      prediction_horizon: 18      # 预测步数 (dt×H×max_v = 0.3×18×0.4 = 2.16m > 2.0m 前瞻)
+      prediction_horizon: 8
       dt: 0.3
       max_v: 0.40
       min_v: -0.10
@@ -114,21 +111,13 @@ controller_server:
       max_w: 0.36
 
       # ════════════════════════════════════════════════════════════════
-      # 噪声探索管线 (采样侧, 不影响代价)
+      # 噪声 (采样侧)
       # ════════════════════════════════════════════════════════════════
-      #   管线: raw_noise → NLN混合 → 时间衰减 → 空间衰减 → 钳位下限
-      #   调试顺序: action_std → noise_decay → spatial_decay
-      #             → exploration_* → noise_floor_*
       action_std_v: 0.5           # vx 噪声 (平衡: 够覆盖 max_v 又不大量后退)
       action_std_vy: 0.3
       action_std_w: 0.4
       nln_ratio: 0.35             # 对数正态占比
-      nln_sigma_mult: 3.0
       noise_decay_rate: 0.55      # 时间衰减
-      exploration_decay_start: 3.0 # 空间衰减起点 (m)
-      exploration_decay_end: 0.5   # 空间衰减终点 (m)
-      exploration_decay_floor: 0.3 # 远距离探索下限
-      spatial_decay_weight: 0.5    # 0=纯时间衰减, 1=纯空间衰减
       noise_scale_floor_vx: 0.35   # vx 探索下限
       noise_scale_floor_vy: 0.30
       noise_scale_floor_w: 0.30
@@ -145,7 +134,6 @@ controller_server:
       # 转弯横向增强 (采样侧: 急弯时自动放大横向运动)
       # ════════════════════════════════════════════════════════════════
       turn_lateral_boost: 2.0      # 转弯增强倍数 (0=关闭)
-      turn_lateral_max_boost: 6.0  # 放大上限
       lateral_guidance_scale: 0.7  # 横向 guidance 基值缩放
 
       # ════════════════════════════════════════════════════════════════
@@ -167,43 +155,34 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       # 前瞻点决策
       # ════════════════════════════════════════════════════════════════
-      #   L = max(min_lookahead_dist, speed × lookahead_time)
-      lookahead_time: 0.0           # 0=固定距离模式
-      min_lookahead_dist: 2.0       # 前瞻距离 (m)
+      min_lookahead_dist: 0.4       # 前瞻距离 (m)
       lookahead_kp: 1.0             # 前瞻减速 (1.0=不减速)
-      lookahead_theta_rate: 0.5     # 朝向变化率限制 (rad/s, 0=禁用)
 
       # ════════════════════════════════════════════════════════════════
       # 终端行为 (与 general_goal_checker 协调)
       # ════════════════════════════════════════════════════════════════
-      #   terminal_angle_dist (0.10m) < xy_goal_tolerance (0.20m)
+      #   terminal_angle_dist (0.05m) < xy_goal_tolerance (0.20m)
       #   terminal_angle_tolerance (4°) < yaw_goal_tolerance (5°)
-      terminal_angle_dist: 0.10
+      terminal_angle_dist: 0.05
       terminal_angle_kp: 1.5
       terminal_angle_tolerance: 0.07
 
       # ════════════════════════════════════════════════════════════════
       # 分层规划
       # ════════════════════════════════════════════════════════════════
-      #   100% 轨迹直接预测到终点
-      global_trajectory_ratio: 1.0
+      #   30% 轨迹直接预测到终点 (终端引导)
+      #   70% 轨迹跟随局部前瞻点 (路径跟踪, 避障)
+      global_trajectory_ratio: 0.3
       global_horizon: 50            # dt×50×max_v = 0.3×50×0.4 = 6.0m 覆盖
-
-      # ════════════════════════════════════════════════════════════════
-      # 行为参数
-      # ════════════════════════════════════════════════════════════════
-      cost_discount: 0.7            # 时序折扣: 近期步骤主导总代价, 让快速 step0 获得高权重
 
       # ════════════════════════════════════════════════════════════════
       # 独立功能开关
       # ════════════════════════════════════════════════════════════════
       pure_rotation_ratio: 0.10     # 纯旋转轨迹占比
       pure_rotation_steps: 2
-      pure_rotation_w_boost: 1.5
       enable_lateral_bias: false    # 横向偏好分析
       enable_heading_speed_limit: true
-      heading_misalign_threshold: 1.57   # 速度方向偏差阈值 (rad), 90°
-      heading_misalign_max_speed: 0.10   # 超阈值时最大速度 (m/s)
+      heading_misalign_threshold: 1.047  # 速度方向偏差阈值 (rad), 60°
       enable_ema: false
       ema_alpha: 0.1
 
@@ -214,10 +193,10 @@ controller_server:
       # ║ ────                        ────                                 ║
       # ║ 离障碍物太近/擦边           obstacle_weight ↑                    ║
       # ║ 不敢靠近障碍物(过度保守)    obstacle_weight ↓                    ║
-      # ║ 朝向不对/终点对不准         heading_weight ↑                     ║
-      # ║ 转弯后摆动(过度对齐)        heading_weight ↓                     ║
-      # ║ 跑得太慢/犹豫               time_weight ↑                        ║
-      # ║ 跑得太快/冲过头             time_weight ↓                        ║
+      # ║ 朝向不对/终点对不准         tracking_weight ↑                    ║
+      # ║ 转弯后摆动(过度对齐)        tracking_weight ↓                    ║
+      # ║ 跑得太慢/犹豫               progress_weight ↑                    ║
+      # ║ 跑得太快/冲过头             progress_weight ↓                    ║
       # ║ 窄通道卡住                  noise_scale_floor_vy ↑               ║
       # ║ 轨迹末端蛇形                noise_decay_rate ↑, enable_ema=true  ║
       # ║ 局部极小出不来              nln_ratio ↑                          ║
@@ -252,30 +231,43 @@ behavior_server:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 0.5
-      publish_frequency: 0.5
+      update_frequency: 1.0         # 降低以避免反复重规划打断窄道计时
+      publish_frequency: 1.0
       global_frame: map
       robot_base_frame: BASE_LINK
       use_sim_time: true
       footprint: "[[0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30]]"
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "inflation_layer"]   # 仅静态地图+膨胀，不订阅传感器 → 内容不变 → 不触发重规划
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
         map_topic: /rtabmap/map
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: pointcloud_sensor
+        pointcloud_sensor:
+          topic: /chest_camera/points_sparse
+          data_type: "PointCloud2"
+          max_obstacle_height: 1.7
+          min_obstacle_height: 0.1
+          obstacle_max_range: 3.0
+          raytrace_max_range: 3.5
+          clearing: True
+          marking: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 7.0    # 高值=代价快速衰减, 靠近障碍物代价低, 允许擦边
+        cost_scaling_factor: 7.0
         inflation_radius: 0.25
 
 # ----------------- 局部代价地图 -----------------
 local_costmap:
   local_costmap:
     ros__parameters:
-      update_frequency: 5.0
-      publish_frequency: 2.0
+      update_frequency: 10.0
+      publish_frequency: 10.0
       global_frame: odom
       robot_base_frame: BASE_LINK
       use_sim_time: true

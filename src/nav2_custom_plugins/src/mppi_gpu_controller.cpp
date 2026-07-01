@@ -21,37 +21,24 @@ int mppi_gpu_sample_and_cost(
     int costmap_w, int costmap_h,
     float costmap_res, float costmap_origin_x, float costmap_origin_y,
     float dt, float min_v, float max_v, float max_vy, float max_w,
-    float obstacle_weight,
-    float heading_weight,
-    float time_weight,
-    float path_dir_x, float path_dir_y,
-    float guidance_weight,
-    float cross_track_noise_scale,
-    float noise_decay_rate,
-    float exploration_range_scale,
-    float spatial_decay_weight,
-    float noise_scale_floor_vx,
-    float noise_scale_floor_vy,
-    float noise_scale_floor_w,
-    float pure_rotation_ratio,
-    int pure_rotation_steps,
-    float pure_rotation_w_boost,
-    float lateral_guidance_scale,
-    float path_turn_angle,
-    float turn_lateral_boost,
-    float turn_lateral_max_boost,
-    float lookahead_theta,
+    float obstacle_weight, float tracking_weight, float progress_weight,
+    float path_dir_x, float path_dir_y, float guidance_weight,
+    float cross_track_noise_scale, float noise_decay_rate,
+    float exploration_range_scale, float spatial_decay_weight,
+    float noise_scale_floor_vx, float noise_scale_floor_vy, float noise_scale_floor_w,
+    float pure_rotation_ratio, int pure_rotation_steps, float pure_rotation_w_boost,
+    float lateral_guidance_scale, float path_turn_angle,
+    float turn_lateral_boost, float turn_lateral_max_boost,
     float fp_front, float fp_back, float fp_left, float fp_right,
-    float footprint_sample_spacing,
-    float rear_obstacle_cost,
-    float cost_discount,
-    float final_goal_x, float final_goal_y, float final_goal_yaw,
+    float footprint_sample_spacing, float rear_obstacle_cost,
+    const float* path_x, const float* path_y, int num_path_pts,
+    float goal_yaw,
+    float final_goal_x, float final_goal_y,
     int global_horizon, int num_global_trajs,
     int num_samples, int horizon,
     float* d_noise_vx, float* d_noise_vy, float* d_noise_w,
     float* d_base_vx, float* d_base_vy, float* d_base_w,
-    unsigned char* d_costmap,
-    float* d_path_x, float* d_path_y,
+    unsigned char* d_costmap, float* d_path_x, float* d_path_y,
     float* d_costs, float* d_sampled_vx, float* d_sampled_vy, float* d_sampled_w,
     float* d_traj_x, float* d_traj_y,
     cudaStream_t stream);
@@ -342,13 +329,39 @@ void MPPIGPUController::globalCostmapCallback(const nav_msgs::msg::OccupancyGrid
 void MPPIGPUController::setPlan(const nav_msgs::msg::Path & path)
 {
   global_plan_ = path;
-  // 新路径到达时重置终端状态，但保留 lookahead_theta_ 全局持久朝向
-  // (朝向变化由变化率限制器控制，跨路径重规划不突变)
   terminal_angle_active_ = false;
+  lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0;
 }
 
 void MPPIGPUController::setSpeedLimit(const double &, const bool &)
 {
+}
+
+ControllerState MPPIGPUController::determineState(
+  double lh_wx, double lh_wy, double goal_wx, double goal_wy,
+  bool near_goal, double heading_err, bool at_end, bool obs_nearby, double now)
+{
+  if (near_goal && std::abs(heading_err) > terminal_angle_tolerance_) {
+    has_prev_lh_ = false; lookahead_stuck_start_ = -1.0;
+    return ControllerState::TERMINAL_ALIGN;
+  }
+  if (std::abs(heading_err) > heading_misalign_threshold_ &&
+      std::abs(heading_err) < 1.92 &&
+      std::hypot(goal_wx - lh_wx, goal_wy - lh_wy) < 1.0)
+    return ControllerState::LATERAL_SHIFT;
+  if (std::abs(heading_err) > heading_misalign_threshold_)
+    return ControllerState::HEADING_MISALIGN;
+  if (!at_end) {
+    double moved = has_prev_lh_ ? std::hypot(lh_wx - prev_lh_wx_, lh_wy - prev_lh_wy_) : 0.0;
+    prev_lh_wx_ = lh_wx; prev_lh_wy_ = lh_wy; has_prev_lh_ = true;
+    if (moved > 0.20) { lookahead_stuck_start_ = -1.0; }
+    else {
+      if (lookahead_stuck_start_ < 0.0) lookahead_stuck_start_ = now;
+      else if (obs_nearby && now - lookahead_stuck_start_ >= lookahead_stuck_timeout_ - 0.005)
+        return ControllerState::NARROW_PASSAGE;
+    }
+  } else { has_prev_lh_ = false; lookahead_stuck_start_ = -1.0; }
+  return ControllerState::NORMAL;
 }
 
 geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
@@ -423,9 +436,11 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       final_goal_yaw_ = tf2::getYaw(global_plan_.poses.back().pose.orientation);
     }
 
-    const double TERMINAL_HYSTERESIS = 0.10;  // 退出迟滞，进入 0.10m，退出 0.20m
+    const double TERMINAL_HYSTERESIS = 0.03;
     if (!terminal_angle_active_ && dist_to_final < terminal_angle_dist_) {
-      terminal_angle_active_ = true;
+      double gy = tf2::getYaw(global_plan_.poses.back().pose.orientation);
+      double ye = gy - current_theta; while (ye > M_PI) ye -= 2.0*M_PI; while (ye < -M_PI) ye += 2.0*M_PI;
+      if (std::abs(ye) > terminal_angle_tolerance_) terminal_angle_active_ = true;
     } else if (terminal_angle_active_ && dist_to_final > terminal_angle_dist_ + TERMINAL_HYSTERESIS) {
       terminal_angle_active_ = false;
     }
@@ -433,36 +448,13 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     if (terminal_angle_active_) {
       double goal_yaw = tf2::getYaw(global_plan_.poses.back().pose.orientation);
       double yaw_err = goal_yaw - current_theta;
-      while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
-      while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
-
-      const double TERMINAL_POS_ARRIVED = 0.005;
-      const double TERMINAL_KP_DIST = 1.0;
-      const double TERMINAL_MAX_APPROACH = 0.25;
-
+      while (yaw_err > M_PI) yaw_err -= 2.0*M_PI; while (yaw_err < -M_PI) yaw_err += 2.0*M_PI;
       if (std::abs(yaw_err) > terminal_angle_tolerance_) {
-        cmd_vel.twist.linear.x = 0.0;
-        cmd_vel.twist.linear.y = 0.0;
+        cmd_vel.twist.linear.x = 0; cmd_vel.twist.linear.y = 0;
         cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, terminal_angle_kp_ * yaw_err));
-      } else if (dist_to_final > TERMINAL_POS_ARRIVED) {
-        double dx_w = final_goal_x_ - current_x;
-        double dy_w = final_goal_y_ - current_y;
-        double dist_w = std::hypot(dx_w, dy_w);
-        double aspd = std::min(TERMINAL_MAX_APPROACH, TERMINAL_KP_DIST * dist_to_final);
-        if (dist_w > 0.001) {
-          double cos_t = std::cos(-current_theta), sin_t = std::sin(-current_theta);
-          cmd_vel.twist.linear.x = ((dx_w/dist_w)*cos_t - (dy_w/dist_w)*sin_t) * aspd;
-          cmd_vel.twist.linear.y = ((dx_w/dist_w)*sin_t + (dy_w/dist_w)*cos_t) * aspd;
-        } else { cmd_vel.twist.linear.x = 0.0; cmd_vel.twist.linear.y = 0.0; }
-        cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, terminal_angle_kp_ * 0.3 * yaw_err));
       } else {
-        cmd_vel.twist.linear.x = 0.0; cmd_vel.twist.linear.y = 0.0; cmd_vel.twist.angular.z = 0.0;
-      }
-
-      if (enable_file_log_ && logger_.is_open()) {
-        const char *br = (std::abs(yaw_err) > terminal_angle_tolerance_) ? "rotate"
-                        : (dist_to_final > TERMINAL_POS_ARRIVED) ? "approach" : "arrived";
-        logger_.logTerminal(true, dist_to_final, yaw_err, br, cmd_vel.twist.linear.x, cmd_vel.twist.linear.y, cmd_vel.twist.angular.z);
+        terminal_angle_active_ = false; terminal_locked_ = false;
+        cmd_vel.twist.linear.x = 0; cmd_vel.twist.linear.y = 0; cmd_vel.twist.angular.z = 0;
       }
       return cmd_vel;
     }
@@ -666,6 +658,158 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
           }
         }
       }
+    }
+  }
+  // ══════════════════════════════════════════
+  // 状态机
+  // ══════════════════════════════════════════
+  {
+    double now_sec = node_.lock()->now().seconds();
+    bool near_goal = std::hypot(final_goal_x_ - current_x, final_goal_y_ - current_y) < terminal_angle_dist_;
+    double h_err = 0.0;
+    if (!global_plan_.poses.empty() && closest_idx + 1 < static_cast<int>(global_plan_.poses.size())) {
+      double pdx = global_plan_.poses[closest_idx+1].pose.position.x - global_plan_.poses[closest_idx].pose.position.x;
+      double pdy = global_plan_.poses[closest_idx+1].pose.position.y - global_plan_.poses[closest_idx].pose.position.y;
+      double nl = std::hypot(pdx, pdy); if (nl > 0.01) { pdx /= nl; pdy /= nl; }
+      h_err = std::atan2(pdy, pdx) - current_theta;
+      while (h_err > M_PI) h_err -= 2.0*M_PI; while (h_err < -M_PI) h_err += 2.0*M_PI;
+    }
+    bool at_end = false;
+    if (!global_plan_.poses.empty()) {
+      double dx = target_x - final_goal_x_, dy = target_y - final_goal_y_;
+      at_end = (dx*dx + dy*dy) < 0.01;
+    }
+    bool obs_nearby = false;
+    if (costmap_ros_) {
+      auto* cm = costmap_ros_->getCostmap();
+      if (cm && cm->getCharMap() && cm->getSizeInCellsX() > 0) {
+        int mx = (target_x - cm->getOriginX()) / cm->getResolution();
+        int my = (target_y - cm->getOriginY()) / cm->getResolution();
+        if (mx >= 0 && mx < (int)cm->getSizeInCellsX() && my >= 0 && my < (int)cm->getSizeInCellsY())
+          obs_nearby = (cm->getCharMap()[my*cm->getSizeInCellsX()+mx] > 200);
+        else obs_nearby = true;
+      }
+    }
+    state_ = determineState(target_x, target_y, final_goal_x_, final_goal_y_,
+                            near_goal, h_err, at_end, obs_nearby, now_sec);
+    // 锁
+    if (state_ == ControllerState::LATERAL_SHIFT) {
+      if (!lateral_locked_) lateral_lock_start_ = now_sec; lateral_locked_ = true;
+    } else if (lateral_locked_) {
+      bool ok = (std::abs(h_err) > heading_misalign_threshold_ && std::abs(h_err) < 1.92 &&
+                 std::hypot(final_goal_x_-current_x, final_goal_y_-current_y) < 1.5);
+      if (now_sec - lateral_lock_start_ > 3.0 || !ok)
+        { lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0; }
+      else state_ = ControllerState::LATERAL_SHIFT;
+    }
+    if (state_ == ControllerState::TERMINAL_ALIGN) terminal_locked_ = true;
+    else if (terminal_locked_) {
+      if (std::hypot(final_goal_x_-current_x, final_goal_y_-current_y) > 0.25) terminal_locked_ = false;
+      else state_ = ControllerState::TERMINAL_ALIGN;
+    }
+    // HEADING
+    if (state_ == ControllerState::HEADING_MISALIGN) {
+      cmd_vel.twist.linear.x = 0; cmd_vel.twist.linear.y = 0;
+      cmd_vel.twist.angular.z = std::copysign(0.7*max_w_, h_err);
+      return cmd_vel;
+    }
+    // LATERAL_SHIFT (精简版)
+    if (state_ == ControllerState::LATERAL_SHIFT) {
+      bool found = false; double bx = 0, by = 0;
+      if (lateral_locked_ && lateral_target_x_ != 0) { bx = lateral_target_x_; by = lateral_target_y_; found = true; }
+      else {
+        auto* cm = costmap_ros_ ? costmap_ros_->getCostmap() : nullptr;
+        if (cm && cm->getCharMap() && cm->getSizeInCellsX() > 0) {
+          const unsigned char* d = cm->getCharMap();
+          int w = cm->getSizeInCellsX(), h = cm->getSizeInCellsY();
+          float r = cm->getResolution(), ox = cm->getOriginX(), oy = cm->getOriginY();
+          double pdx, pdy;
+          if (!global_plan_.poses.empty() && closest_idx+1 < (int)global_plan_.poses.size()) {
+            pdx = global_plan_.poses[closest_idx+1].pose.position.x - global_plan_.poses[closest_idx].pose.position.x;
+            pdy = global_plan_.poses[closest_idx+1].pose.position.y - global_plan_.poses[closest_idx].pose.position.y;
+          } else { pdx = cos(current_theta); pdy = sin(current_theta); }
+          double nl = std::hypot(pdx, pdy); if (nl > 0.01) { pdx /= nl; pdy /= nl; }
+          double maxf = std::min(0.50, std::hypot(final_goal_x_-target_x, final_goal_y_-target_y));
+          for (double dd = 0; dd <= maxf && !found; dd += 0.10) {
+            double cx = target_x + dd*pdx, cy = target_y + dd*pdy;
+            bool safe = true;
+            for (int iy=0; iy<4 && safe; ++iy)
+              for (int ix=0; ix<4 && safe; ++ix) {
+                double fx = -footprint_back_ + ix*(footprint_front_+footprint_back_)/3.0;
+                double fy = -footprint_right_ + iy*(footprint_left_+footprint_right_)/3.0;
+                double wx = cx + fx*cos(current_theta) - fy*sin(current_theta);
+                double wy = cy + fx*sin(current_theta) + fy*cos(current_theta);
+                int mx = (wx-ox)/r, my = (wy-oy)/r;
+                if ((mx>=0&&mx<w&&my>=0&&my<h ? d[my*w+mx] : (unsigned char)255) >= nav2_costmap_2d::LETHAL_OBSTACLE) safe = false;
+              }
+            if (safe) { bx = cx; by = cy; found = true; }
+          }
+          if (found && !lateral_locked_) { lateral_target_x_ = bx; lateral_target_y_ = by; }
+        }
+      }
+      if (found) {
+        double dx = bx - current_x, dy = by - current_y, dist = std::hypot(dx, dy);
+        if (dist < 0.05) { lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0; }
+        else { double c=cos(-current_theta), s=sin(-current_theta), sp=std::min(0.15,0.5*dist);
+          cmd_vel.twist.linear.x = ((dx/dist)*c-(dy/dist)*s)*sp;
+          cmd_vel.twist.linear.y = ((dx/dist)*s+(dy/dist)*c)*sp; }
+      }
+      return cmd_vel;
+    }
+    // NARROW_PASSAGE
+    if (state_ == ControllerState::NARROW_PASSAGE) {
+      nav2_costmap_2d::Costmap2D* cm = costmap_ros_ ? costmap_ros_->getCostmap() : nullptr;
+      const unsigned char* ns_cm = nullptr; int ns_w=0, ns_h=0; float ns_r=0.05f, ns_ox=0, ns_oy=0;
+      if (cm && cm->getCharMap()) { ns_cm=cm->getCharMap(); ns_w=cm->getSizeInCellsX(); ns_h=cm->getSizeInCellsY(); ns_r=cm->getResolution(); ns_ox=cm->getOriginX(); ns_oy=cm->getOriginY(); }
+      double ns_pdx=0, ns_pdy=0;
+      if (!global_plan_.poses.empty() && closest_idx+1 < (int)global_plan_.poses.size()) {
+        ns_pdx=global_plan_.poses[closest_idx+1].pose.position.x-global_plan_.poses[closest_idx].pose.position.x;
+        ns_pdy=global_plan_.poses[closest_idx+1].pose.position.y-global_plan_.poses[closest_idx].pose.position.y; }
+      double nl=std::hypot(ns_pdx,ns_pdy); if(nl>0.01){ns_pdx/=nl;ns_pdy/=nl;} else{ns_pdx=cos(current_theta);ns_pdy=sin(current_theta);}
+      auto fp_coll=[&](double cx,double cy,double ct){if(!ns_cm)return false;double cc=cos(ct),ss=sin(ct);
+        for(int iy=0;iy<4;++iy)for(int ix=0;ix<4;++ix){double fx=-footprint_back_+ix*(footprint_front_+footprint_back_)/3.0,fy=-footprint_right_+iy*(footprint_left_+footprint_right_)/3.0;
+          double wx=cx+fx*cc-fy*ss,wy=cy+fx*ss+fy*cc;int mx=(wx-ns_ox)/ns_r,my=(wy-ns_oy)/ns_r;
+          if((mx>=0&&mx<ns_w&&my>=0&&my<ns_h?ns_cm[my*ns_w+mx]:(unsigned char)255)>=nav2_costmap_2d::LETHAL_OBSTACLE)return true;}return false;};
+      auto fp_cost=[&](double cx,double cy,double ct){if(!ns_cm)return 0.0;double cc=cos(ct),ss=sin(ct),mv=0;
+        for(int iy=0;iy<4;++iy)for(int ix=0;ix<4;++ix){double fx=-footprint_back_+ix*(footprint_front_+footprint_back_)/3.0,fy=-footprint_right_+iy*(footprint_left_+footprint_right_)/3.0;
+          double wx=cx+fx*cc-fy*ss,wy=cy+fx*ss+fy*cc;int mx=(wx-ns_ox)/ns_r,my=(wy-ns_oy)/ns_r;
+          double v=(mx>=0&&mx<ns_w&&my>=0&&my<ns_h)?ns_cm[my*ns_w+mx]:255.0;if(v>mv)mv=v;}return mv;};
+      auto srch=[&](double cx,double cy,double&ot){double fwd=atan2(ns_pdy,ns_pdx);
+        for(int i=0;i<13;++i){int off=(i+1)/2;if(i%2==1)off=-off;double t=fwd+off*2.0*M_PI/24.0;if(!fp_coll(cx,cy,t)){ot=t;return true;}}return false;};
+      bool ndone=false;
+      switch(narrow_sub_state_){
+        case NarrowSubState::SEARCH_BOX:
+          cmd_vel.twist.linear.x=0;cmd_vel.twist.linear.y=0;cmd_vel.twist.angular.z=0;
+          if(narrow_box_locked_){narrow_sub_state_=NarrowSubState::ALIGN;break;}
+          narrow_entry_cost_=fp_cost(current_x,current_y,current_theta);
+          {double ft;const double FW[]={0.0,0.10,0.20,0.30};
+          for(double f:FW){double cx=target_x+f*ns_pdx,cy=target_y+f*ns_pdy;
+            if((cx-current_x)*ns_pdx+(cy-current_y)*ns_pdy<-0.05)continue;
+            if(srch(cx,cy,ft)){narrow_box_target_x_=cx;narrow_box_target_y_=cy;narrow_box_target_theta_=ft;narrow_box_found_=true;break;}}
+          if(!narrow_box_found_){double lx=-ns_pdy,ly=ns_pdx;const double LA[]={0.06,-0.06};
+            for(double f:FW){for(double lat:LA){double cx=target_x+f*ns_pdx+lat*lx,cy=target_y+f*ns_pdy+lat*ly;
+              if((cx-current_x)*ns_pdx+(cy-current_y)*ns_pdy<-0.05)continue;
+              if(srch(cx,cy,ft)){narrow_box_target_x_=cx;narrow_box_target_y_=cy;narrow_box_target_theta_=ft;narrow_box_found_=true;break;}}
+              if(narrow_box_found_)break;}}}
+          if(narrow_box_found_){narrow_box_locked_=true;narrow_sub_state_=NarrowSubState::ALIGN;}
+          break;
+        case NarrowSubState::ALIGN:
+          {double ye=narrow_box_target_theta_-current_theta;while(ye>M_PI)ye-=2.0*M_PI;while(ye<-M_PI)ye+=2.0*M_PI;
+          if(std::abs(ye)<0.05){narrow_sub_state_=NarrowSubState::ADVANCE;cmd_vel.twist.angular.z=0;}
+          else cmd_vel.twist.angular.z=std::max(-max_w_,std::min(max_w_,1.5*ye));}
+          break;
+        case NarrowSubState::ADVANCE:
+          {double dx=narrow_box_target_x_-current_x,dy=narrow_box_target_y_-current_y,dist=std::hypot(dx,dy);
+          if(dist<0.05){double bc=fp_cost(narrow_box_target_x_,narrow_box_target_y_,narrow_box_target_theta_);
+            if(bc<narrow_entry_cost_)ndone=true;else{narrow_box_locked_=false;narrow_box_found_=false;narrow_sub_state_=NarrowSubState::SEARCH_BOX;}
+            cmd_vel.twist.linear.x=0;cmd_vel.twist.linear.y=0;cmd_vel.twist.angular.z=0;}
+          else{double c=cos(-current_theta),s=sin(-current_theta),sp=std::min(0.15,0.5*dist);
+            cmd_vel.twist.linear.x=((dx/dist)*c-(dy/dist)*s)*sp;cmd_vel.twist.linear.y=((dx/dist)*s+(dy/dist)*c)*sp;cmd_vel.twist.angular.z=0;}}
+          break;
+      }
+      if(ndone){state_=ControllerState::NORMAL;narrow_sub_state_=NarrowSubState::SEARCH_BOX;
+        has_prev_lh_=false;lookahead_stuck_start_=-1.0;narrow_box_found_=false;narrow_box_locked_=false;narrow_entry_cost_=1e9;}
+      return cmd_vel;
     }
   }
 
@@ -1151,6 +1295,28 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
   float dyn_noise_vy       = noise_scale_floor_vy_ + lookahead_blockage * 0.5f;
   float dyn_noise_w        = noise_scale_floor_w_  + lookahead_blockage * 0.4f;
 
+  // 全局路径重采样 (供 GPU cross-track 计算)
+  std::vector<float> host_path_x, host_path_y;
+  int num_path_pts = 0;
+  if (!global_plan_.poses.empty()) {
+    int start_i = closest_idx;
+    int end_i = static_cast<int>(global_plan_.poses.size()) - 1;
+    int n_pts = std::min(MAX_PATH_POINTS, end_i - start_i + 1);
+    if (n_pts >= 2) {
+      double step = static_cast<double>(end_i - start_i) / (n_pts - 1);
+      for (int k = 0; k < n_pts; ++k) {
+        int idx = start_i + static_cast<int>(k * step);
+        if (idx > end_i) idx = end_i;
+        host_path_x.push_back(static_cast<float>(global_plan_.poses[idx].pose.position.x));
+        host_path_y.push_back(static_cast<float>(global_plan_.poses[idx].pose.position.y));
+      }
+      num_path_pts = n_pts;
+    }
+  }
+  float goal_yaw_f = 0.0f;
+  if (!global_plan_.poses.empty())
+    goal_yaw_f = static_cast<float>(tf2::getYaw(global_plan_.poses.back().pose.orientation));
+
   // 创建 CUDA stream
   cudaStream_t stream;
   cudaStreamCreate(&stream);
@@ -1184,15 +1350,14 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       static_cast<float>(path_turn_angle),
       static_cast<float>(turn_lateral_boost_),
       static_cast<float>(turn_lateral_max_boost_),
-      static_cast<float>(lookahead_theta_),
       static_cast<float>(footprint_front_), static_cast<float>(footprint_back_),
       static_cast<float>(footprint_left_), static_cast<float>(footprint_right_),
       static_cast<float>(footprint_sample_spacing_),
       static_cast<float>(rear_obstacle_cost_),
-      static_cast<float>(cost_discount_),
+      host_path_x.data(), host_path_y.data(), num_path_pts,
+      goal_yaw_f,
       static_cast<float>(final_goal_x_),
       static_cast<float>(final_goal_y_),
-      static_cast<float>(final_goal_yaw_),
       global_horizon_,
       static_cast<int>(N * global_trajectory_ratio_),
       N, H,
@@ -1316,28 +1481,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
 
 
 
-  // ── 朝向偏差限速: 脸朝向偏离目标过大时限速, 确保先转向再前进 ──
-  if (enable_heading_speed_limit_) {
-    double dx_target = target_x - current_x;
-    double dy_target = target_y - current_y;
-    double target_dist = std::hypot(dx_target, dy_target);
-    if (target_dist > 0.05) {
-      double target_dir = std::atan2(dy_target, dx_target);
-      double heading_err = target_dir - current_theta;
-      while (heading_err > M_PI) heading_err -= 2.0 * M_PI;
-      while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
-
-      if (std::abs(heading_err) > heading_misalign_threshold_) {
-        double speed = std::hypot(best_vx, best_vy);
-        if (speed > heading_misalign_max_speed_) {
-          double scale = heading_misalign_max_speed_ / speed;
-          best_vx *= scale;
-          best_vy *= scale;
-        }
-        best_omega = std::copysign(0.7 * max_w_, heading_err);
-      }
-    }
-  }
+  // 朝向限速已由状态机 HEADING_MISALIGN 处理
 
   // ── 死区保护 ──
   {
