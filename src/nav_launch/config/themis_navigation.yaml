@@ -54,7 +54,7 @@ planner_server:
 controller_server:
   ros__parameters:
     use_sim_time: true
-    controller_frequency: 20.0
+    controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
@@ -94,17 +94,17 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       # 三组件代价权重
       # ════════════════════════════════════════════════════════════════
-      obstacle_weight: 20.0        # ObstaclesCritic: 碰撞检测 (norm^4)
-      tracking_weight: 20.0        # PathAlignCritic + PathAngleCritic + GoalAngleCritic
-      progress_weight: 5.0         # PreferForwardCritic + GoalCritic
+      obstacle_weight: 10.0        # ObstaclesCritic: 碰撞检测 (norm^4)
+      tracking_weight: 30.0        # PathAlignCritic + PathAngleCritic + GoalAngleCritic
+      progress_weight: 1.5         # PreferForwardCritic + GoalCritic (压低→减弱推头)
 
       # ════════════════════════════════════════════════════════════════
       # 预测时空 (dt × horizon × max_v = 有效预测距离)
       # ════════════════════════════════════════════════════════════════
-      #   dt×H×max_v = 0.3×8×0.4 = 0.96m, 前瞻点 0.4m
+      #   dt×H×max_v = 0.1×12×0.4 = 0.48m, 前瞻点 0.4m
       num_samples: 3000
-      prediction_horizon: 8
-      dt: 0.3
+      prediction_horizon: 12
+      dt: 0.1
       max_v: 0.40
       min_v: -0.10
       max_vy: 0.20
@@ -128,7 +128,7 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       #   vx/vy = (1-γ)×(base+noise) + γ×(path_dir×speed)
       #   γ=0: 纯采样, γ=1: 纯路径锚定
-      guidance_weight: 0.4       # 引导强度: 40% 速度来自 lookahead 方向引导
+      guidance_weight: 0.2       # 引导强度: 降低 vx 偏置, 给 vy 更多自由度
 
       # ════════════════════════════════════════════════════════════════
       # 转弯横向增强 (采样侧: 急弯时自动放大横向运动)
@@ -161,9 +161,9 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       # 终端行为 (与 general_goal_checker 协调)
       # ════════════════════════════════════════════════════════════════
-      #   terminal_angle_dist (0.05m) < xy_goal_tolerance (0.20m)
+      #   terminal_angle_dist (0.10m): 终端区域代价清零, MPPI 自然对齐
       #   terminal_angle_tolerance (4°) < yaw_goal_tolerance (5°)
-      terminal_angle_dist: 0.05
+      terminal_angle_dist: 0.08
       terminal_angle_kp: 1.5
       terminal_angle_tolerance: 0.07
 
@@ -259,8 +259,8 @@ global_costmap:
           marking: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 7.0
-        inflation_radius: 0.25
+        cost_scaling_factor: 4.0     # 衰减更缓 → 路径远离障碍物
+        inflation_radius: 0.50       # > 外接圆 0.36m, 留安全裕量
 
 # ----------------- 局部代价地图 -----------------
 local_costmap:

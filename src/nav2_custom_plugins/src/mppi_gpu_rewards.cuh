@@ -116,12 +116,33 @@ __device__ float compute_path_angle_cost(
 // 组件 3: progress_cost (GoalCritic + PreferForwardCritic)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// PreferForwardCritic: 速度在路径方向的投影
-///   正向→负代价(奖励), 反向→正代价(惩罚), 零→无影响
+/// PreferForwardCritic: 匹配速度方向与"当前位置→前瞻点"方向
+///   速度方向朝向前瞻点 → 奖励 (速度越快奖励越大)
+///   速度方向背离前瞻点 → 惩罚 (5倍)
+///   中间角度: 奖励对齐分量, 惩罚侧向分量, 防止推头
 __device__ float compute_speed_reward(
-    float vx, float vy, float path_vx_r, float path_vy_r)
+    float vx, float vy, float target_vx_r, float target_vy_r)
 {
-  return -(vx * path_vx_r + vy * path_vy_r);
+  float speed = hypotf(vx, vy);
+  if (speed < 1e-6f) return 0.0f;
+
+  // 速度矢量角度 vs 前瞻点方向角度 (均在机器人坐标系)
+  float vel_angle   = atan2f(vy, vx);
+  float target_angle = atan2f(target_vy_r, target_vx_r);
+  float angle_err = vel_angle - target_angle;
+  while (angle_err > CUDART_PI_F)  angle_err -= 2.0f * CUDART_PI_F;
+  while (angle_err < -CUDART_PI_F) angle_err += 2.0f * CUDART_PI_F;
+
+  float alignment = cosf(angle_err);  // 1=完美对齐, 0=垂直, -1=完全背离
+
+  // 背离前瞻点 (>90°): 5倍重罚
+  if (alignment < 0.0f) return speed * 5.0f;
+
+  // 奖励速度的对齐分量, 惩罚侧向浪费
+  // 完美对齐 (err=0):   cost = -speed        → 越快越好
+  // 45°偏差:            cost ≈ 0            → 速度无影响
+  // 45°~90°偏差:        cost > 0            → 减速才有利 → 迫使转向对齐
+  return -speed * alignment + speed * fabsf(sinf(angle_err));
 }
 
 /// GoalCritic: 终端距离代价

@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mppi_benchmark</name>
+  <version>0.1.0</version>
+  <description>GPU vs CPU benchmark for MPPI cost computation kernel</description>
+  <maintainer email="wzz2002@example.com">wzz2002</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <build_depend>cuda</build_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

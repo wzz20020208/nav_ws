@@ -150,7 +150,7 @@ private:
   double footprint_back_ = 0.3;    // 碰撞箱后向半尺寸 (m)
   double footprint_left_ = 0.4;    // 碰撞箱左向半尺寸 (m)
   double footprint_right_ = 0.4;   // 碰撞箱右向半尺寸 (m)
-  double terminal_angle_dist_ = 0.10;      // 终端角度对准距离 (m)，<此距离退化 MPPI → 纯角度追踪
+  double terminal_angle_dist_ = 0.05;      // 终端对准距离 (m)
   double terminal_angle_kp_ = 1.5;         // 终端角度 P 控制器增益
   double terminal_angle_tolerance_ = 0.07; // 终端角度容忍度 (rad), ≈4°, 留裕量给 5° goal checker
   // ── 障碍物代价内部参数 ──
@@ -208,29 +208,36 @@ private:
 
   // ── 状态机 ──
   ControllerState state_ = ControllerState::NORMAL;
+  ControllerState prev_state_ = ControllerState::NORMAL;  // 上一帧状态, 用于禁止特殊状态间直接跳转
   NarrowSubState narrow_sub_state_ = NarrowSubState::SEARCH_BOX;
 
-  // 窄道检测: 前瞻点世界坐标不移动 + 附近有障碍
-  double prev_lh_wx_ = 0.0, prev_lh_wy_ = 0.0;
-  bool   has_prev_lh_ = false;
-  double lookahead_stuck_start_ = -1.0;
-  double lookahead_stuck_timeout_ = 1.0;
 
   // 窄道执行
   double narrow_box_target_x_ = 0.0, narrow_box_target_y_ = 0.0, narrow_box_target_theta_ = 0.0;
-  bool   narrow_box_found_ = false, narrow_box_locked_ = false;
+  bool   narrow_box_found_ = false, narrow_box_locked_ = false, narrow_final_target_ = false;
   double narrow_entry_cost_ = 1e9;
+  int    narrow_last_closest_ = -1;     // 上一帧 closest_idx, 用于检测搜索是否前进
+  double narrow_search_progress_ = 0.0; // 已搜索过的路径距离, 下次从这之后继续
+  double narrow_verify_speed_ = -1.0;   // 上一次 ADVANCE 验证的投影速度, -1=未验证
 
   // 横向移动
   bool   lateral_locked_ = false;
   double lateral_target_x_ = 0.0, lateral_target_y_ = 0.0, lateral_lock_start_ = 0.0;
+  double lateral_reach_time_ = -1.0;  // 到达目标点的时间, 用于冷却防止原地重复搜索
 
   // 终端对齐
-  bool   terminal_locked_ = false;
+  double terminal_exit_time_ = -1.0;
 
   ControllerState determineState(
     double lh_wx, double lh_wy, double goal_wx, double goal_wy,
-    bool near_goal, double heading_err, bool at_end, bool obs_nearby, double now);
+    bool near_goal, double heading_err, bool at_end, bool all_at_end,
+    bool mppi_hesitate, double now,
+    double cur_x, double cur_y);
+
+  int hesitate_count_ = 0;                  // 连续踌躇帧数
+  std::ofstream narrow_diag_log_;
+  void narrowDiagHdr();
+  void narrowDiagRow(double t, double lh_wx, double lh_wy, double moved, bool at_end, double stuck_dur, ControllerState s, double rx, double ry, double gx, double gy, double df, int near, int lh_cost);
 
   // ── 运行时统计数据采集 ──
   bool enable_stats_ = false;

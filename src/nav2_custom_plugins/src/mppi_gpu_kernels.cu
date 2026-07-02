@@ -80,6 +80,11 @@ __global__ void mppi_sample_kernel(
   float noise_boost = 1.0f + turn_sharp * turn_lateral_boost * 0.4f
                            + side_r * turn_lateral_boost * 0.15f;
 
+  // ── 前瞻点方向 (机器人坐标系), 用于速度奖励 ──
+  float lh_dist = hypotf(tx_r, ty_r);
+  float lh_vx_r = tx_r / fmaxf(lh_dist, 1e-6f);
+  float lh_vy_r = ty_r / fmaxf(lh_dist, 1e-6f);
+
   // ── omega 引导 ──
   float path_angle_err = atan2f(path_vy_r, path_vx_r);
 
@@ -146,8 +151,8 @@ __global__ void mppi_sample_kernel(
                + compute_path_angle_cost(theta, path_tangent, goal_yaw,
                                          dist_to_final, horizon);
 
-    // 3. PreferForwardCritic → progress
-    prog_acc += compute_speed_reward(vx, vy, path_vx_r, path_vy_r);
+    // 3. PreferForwardCritic → progress (使用前瞻点方向, 非路径切线)
+    prog_acc += compute_speed_reward(vx, vy, lh_vx_r, lh_vy_r);
 
     cum_dist += hypotf(dx2 * dt, dy2 * dt);
   }
