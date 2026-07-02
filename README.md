@@ -30,7 +30,7 @@ ros2 launch nav_launch nav_launch.py
 # 3. 启动导航 (含 MPPI 控制器)
 ros2 launch nav_launch themis_navigation.launch.py
 
-# 4. 启动可视化 (可选)
+# 4. 启动建图 (可选, 首次运行或更新地图时使用)
 ros2 launch nav_launch themis_rtabmap_rgbd_mapping.launch.py
 ```
 
