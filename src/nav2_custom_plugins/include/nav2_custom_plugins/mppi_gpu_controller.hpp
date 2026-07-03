@@ -41,8 +41,7 @@ enum class ControllerState : uint8_t
   NORMAL = 0,
   HEADING_MISALIGN = 1,
   NARROW_PASSAGE = 2,
-  TERMINAL_ALIGN = 3,
-  LATERAL_SHIFT = 4
+  TERMINAL_ALIGN = 3
 };
 
 /// 窄道子状态
@@ -220,11 +219,6 @@ private:
   double narrow_search_progress_ = 0.0; // 已搜索过的路径距离, 下次从这之后继续
   double narrow_verify_speed_ = -1.0;   // 上一次 ADVANCE 验证的投影速度, -1=未验证
 
-  // 横向移动
-  bool   lateral_locked_ = false;
-  double lateral_target_x_ = 0.0, lateral_target_y_ = 0.0, lateral_lock_start_ = 0.0;
-  double lateral_reach_time_ = -1.0;  // 到达目标点的时间, 用于冷却防止原地重复搜索
-
   // 终端对齐
   double terminal_exit_time_ = -1.0;
 
@@ -247,6 +241,7 @@ private:
   int stats_frame_count_ = 0;
   double prev_vx_raw_ = 0.0, prev_vy_raw_ = 0.0, prev_omega_raw_ = 0.0;
   bool has_prev_stats_ = false;
+  float prev_bc_ = 0.0f;  // 上一帧主 MPPI best cost, 供 vmppi 使用
   double mutation_thresh_vx_ = 0.3;   // vx 突变阈值 (m/s)
   double mutation_thresh_vy_ = 0.15;  // vy 突变阈值 (m/s)
   double mutation_thresh_w_ = 0.3;    // omega 突变阈值 (rad/s)

@@ -337,7 +337,6 @@ void MPPIGPUController::setPlan(const nav_msgs::msg::Path & path)
     double new_gy = path.poses.back().pose.position.y;
     if (std::hypot(new_gx - old_gx, new_gy - old_gy) > 0.10) {
       terminal_angle_active_ = false;
-      lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0;
       narrow_box_locked_ = false;
       narrow_box_found_ = false;
       narrow_final_target_ = false;
@@ -347,6 +346,7 @@ void MPPIGPUController::setPlan(const nav_msgs::msg::Path & path)
   }
   global_plan_ = path;
   hesitate_count_ = 0;
+  prev_bc_ = 0.0f;
 }
 
 void MPPIGPUController::setSpeedLimit(const double &, const bool &)
@@ -384,22 +384,13 @@ ControllerState MPPIGPUController::determineState(
   if (prev_state_ == ControllerState::NARROW_PASSAGE && narrow_box_locked_) {
     return ControllerState::NARROW_PASSAGE;
   }
-  // LATERAL_SHIFT: 横向移动中, 不允许其他状态介入
-  if (prev_state_ == ControllerState::LATERAL_SHIFT && lateral_locked_) {
-    return ControllerState::LATERAL_SHIFT;
-  }
-
-  // ── 候选状态计算 (优先级: 终端 > 横向 > 朝向 > 窄道 > 正常) ──
+  // ── 候选状态计算 (优先级: 终端 > 朝向 > 窄道 > 正常) ──
   ControllerState candidate = ControllerState::NORMAL;
   // 1. 终端对准: 三个前瞻点都到终点 → 进入终端模式
   if (all_at_end) {
     candidate = ControllerState::TERMINAL_ALIGN;
   }
-  // 2. 横向移动
-  else if (std::abs(heading_err) > heading_misalign_threshold_ &&
-           std::abs(heading_err) < 1.92 &&
-           std::hypot(goal_wx - lh_wx, goal_wy - lh_wy) < 1.0) { candidate = ControllerState::LATERAL_SHIFT; }
-  // 3. 朝向修正
+  // 2. 朝向修正
   else if (std::abs(heading_err) > heading_misalign_threshold_ &&
            std::hypot(goal_wx - lh_wx, goal_wy - lh_wy) >= 0.5 &&
            (terminal_exit_time_ < 0 || now - terminal_exit_time_ > 0.5)) { candidate = ControllerState::HEADING_MISALIGN; }
@@ -650,9 +641,10 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
           return found;
         };
 
-        // 两个虚拟机器人位置: 弧长方法, 与主前瞻点逻辑一致
+        // 虚拟机器人位置: 弧长方法, 与主前瞻点逻辑一致
         // 从 closest_idx 起沿路径测量弧长, 在距机器人 ≥ VIRT_LOOKAHEAD[vi] 处取点
-        double vx_arr[2], vy_arr[2];
+        const int N_VIRT = 2;
+        double vx_arr[N_VIRT], vy_arr[N_VIRT];
         {
           const double VIRT_LOOKAHEAD[2] = {0.20, 0.40};
           int last_pose_idx = static_cast<int>(global_plan_.poses.size()) - 1;
@@ -661,7 +653,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
           // 兜底: 剩余路径不足时 clamp 到终点
           vx_arr[0] = gx_end; vy_arr[0] = gy_end;
           vx_arr[1] = gx_end; vy_arr[1] = gy_end;
-          for (int vi = 0; vi < 2; ++vi) {
+          for (int vi = 0; vi < N_VIRT; ++vi) {
             // 从 closest_idx 起扫描, 用弧长 (逐段欧氏距离累加) 而非直线距离
             double cum = 0;
             for (int pi = closest_idx; pi + 1 < (int)global_plan_.poses.size(); ++pi) {
@@ -682,16 +674,11 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
             // 路径剩余不足 VIRT_LOOKAHEAD[vi]: 保留 fallback 值 (已 clamp 到终点)
           }
         }
-        double proj_arr[2] = {1.0, 1.0};
+        double proj_arr[N_VIRT] = {1.0, 1.0};
         std::vector<double> vtheta_arr = {vtheta, vtheta};  // 记录每个虚拟机器人的实际起始朝向
 
-        for (int vi = 0; vi < 2; ++vi) {
-          // 搜索无碰朝向 (同 SEARCH_BOX 逻辑), 朝向前瞻点方向
-          double search_theta;
-          double vpath_tangent = atan2(target_y - vy_arr[vi], target_x - vx_arr[vi]);
-          if (vsrch(vx_arr[vi], vy_arr[vi], vpath_tangent, search_theta)) {
-            vtheta_arr[vi] = search_theta;
-          }
+        for (int vi = 0; vi < N_VIRT; ++vi) {
+          // 不搜索无碰朝向 — 统一面向主前瞻点, 障碍挡路才触发踌躇
           // 生成噪声
           for (int i = 0; i < VN * VH; ++i) {
             vn_vx[i] = static_cast<float>(dist_vx_(generator_));
@@ -750,35 +737,28 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
         }
         cudaStreamDestroy(vs);
 
-        // 双侧障碍物检查: 只有左右都堵或前后都堵才算真正的窄道踌躇
-        {
-          auto vcell_cost = [&](double wx, double wy) -> unsigned char {
-            int mx = (wx - vox) / vr, my = (wy - voy) / vr;
-            if (mx >= 0 && mx < vw && my >= 0 && my < vh)
-              return vd[my * vw + mx];
-            return nav2_costmap_2d::LETHAL_OBSTACLE;
-          };
-          for (int vi = 0; vi < 2; ++vi) {
-            double vc = std::cos(vtheta_arr[vi]), vs = std::sin(vtheta_arr[vi]);
-            double front_c = vcell_cost(vx_arr[vi] + 0.15*vc, vy_arr[vi] + 0.15*vs);
-            double back_c  = vcell_cost(vx_arr[vi] - 0.15*vc, vy_arr[vi] - 0.15*vs);
-            double left_c   = vcell_cost(vx_arr[vi] - 0.15*vs, vy_arr[vi] + 0.15*vc);
-            double right_c  = vcell_cost(vx_arr[vi] + 0.15*vs, vy_arr[vi] - 0.15*vc);
-            bool lr_blocked = (left_c >= nav2_costmap_2d::LETHAL_OBSTACLE &&
-                               right_c >= nav2_costmap_2d::LETHAL_OBSTACLE);
-            bool fb_blocked = (front_c >= nav2_costmap_2d::LETHAL_OBSTACLE &&
-                               back_c >= nav2_costmap_2d::LETHAL_OBSTACLE);
-            if (!lr_blocked && !fb_blocked) proj_arr[vi] = 1.0;
-          }
-        }
-
-        if (proj_arr[0] < 0.10 && proj_arr[1] < 0.10) hesitate_count_++;
-        else hesitate_count_ = 0;
+        // 窄道踌躇: 虚拟 MPPI 双低 或 主 MPPI 上一帧代价极高
+        // prev_bc_ 高 → 机器人当前位置被堵死, 直接触发
+        if (prev_bc_ > 30.0f)
+          mppi_hesitate = true;
+        else if (proj_arr[0] < 0.10 && proj_arr[1] < 0.10)
+          hesitate_count_++;
+        else
+          hesitate_count_ = 0;
         if (hesitate_count_ >= 3) mppi_hesitate = true;
-        // 可视化两个虚拟机器人位置 (近点蓝色, 远点红色)
+        // 虚拟 MPPI 诊断日志
+        {
+          std::ostringstream vos;
+          vos << std::fixed << std::setprecision(4)
+              << "proj0=" << proj_arr[0] << " proj1=" << proj_arr[1]
+              << " hcnt=" << hesitate_count_ << " hes=" << (mppi_hesitate ? 1 : 0)
+              << " pbc=" << prev_bc_;
+          logger_.logState("vmppi", vos.str());
+        }
+        // 可视化虚拟机器人 (v0蓝色, v1红色)
         if (vis_pub_) {
           visualization_msgs::msg::MarkerArray ma; auto now = node_.lock()->now();
-          for (int vi = 0; vi < 2; ++vi) {
+          for (int vi = 0; vi < N_VIRT; ++vi) {
             visualization_msgs::msg::Marker m;
             m.header.frame_id = "odom"; m.header.stamp = now;
             m.ns = "virtual_mppi"; m.id = vi;
@@ -856,16 +836,6 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
                             current_x, current_y);
     { static bool diag_init = false; if (!diag_init) { narrowDiagHdr(); diag_init = true; } }
     narrowDiagRow(now_sec, target_x, target_y, 0.0, at_end, mppi_hesitate?1.0:0.0, state_, current_x, current_y, final_goal_x_, final_goal_y_, std::hypot(final_goal_x_-current_x, final_goal_y_-current_y), near_goal?1:0, lh_cost);
-    // 锁
-    if (state_ == ControllerState::LATERAL_SHIFT) {
-      if (!lateral_locked_) lateral_lock_start_ = now_sec; lateral_locked_ = true;
-    } else if (lateral_locked_) {
-      // 锁维持: 只在超时保护下退出 (12s, 足够以 0.15m/s 走 1.8m)
-      // 不再因 heading_err 变化而退出 — 到达目标点才是唯一正常出口
-      if (now_sec - lateral_lock_start_ > 12.0)
-        { lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0; }
-      else state_ = ControllerState::LATERAL_SHIFT;
-    }
     // NARROW 锁: 框体锁定后不允许退出
     if (state_ != ControllerState::NARROW_PASSAGE && narrow_box_locked_)
       state_ = ControllerState::NARROW_PASSAGE;
@@ -875,8 +845,6 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       double goal_yaw = tf2::getYaw(global_plan_.poses.back().pose.orientation);
       double ye = goal_yaw - current_theta;
       while (ye > M_PI) ye -= 2.0*M_PI; while (ye < -M_PI) ye += 2.0*M_PI;
-      if (ye > M_PI_2) ye -= M_PI;
-      else if (ye < -M_PI_2) ye += M_PI;
       // Phase 1: 旋转对齐 yaw
       if (std::abs(ye) > terminal_angle_tolerance_) {
         cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, terminal_angle_kp_ * ye));
@@ -978,71 +946,6 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
         tf2::Quaternion q; q.setRPY(0,0,ty); m.pose.orientation=tf2::toMsg(q);
         m.scale.x=0.35; m.scale.y=0.03; m.scale.z=0.03; m.color.a=0.8f;
         m.color.r=1; m.color.g=0.8f; m.color.b=0; m.lifetime=rclcpp::Duration::from_seconds(0.1);
-        ma.markers.push_back(m); vis_pub_->publish(ma); }
-      return cmd_vel;
-    }
-    // LATERAL_SHIFT (精简版)
-    if (state_ == ControllerState::LATERAL_SHIFT) {
-      bool found = false; double bx = 0, by = 0;
-      // 冷却期: 到达目标后 1s 内不再搜索, 防止原地重复搜索
-      bool in_cooldown = (lateral_reach_time_ > 0 && now_sec - lateral_reach_time_ < 1.0);
-      if (lateral_locked_ && lateral_target_x_ != 0) { bx = lateral_target_x_; by = lateral_target_y_; found = true; }
-      else if (!in_cooldown) {
-        auto* cm = costmap_ros_ ? costmap_ros_->getCostmap() : nullptr;
-        if (cm && cm->getCharMap() && cm->getSizeInCellsX() > 0) {
-          const unsigned char* d = cm->getCharMap();
-          int w = cm->getSizeInCellsX(), h = cm->getSizeInCellsY();
-          float r = cm->getResolution(), ox = cm->getOriginX(), oy = cm->getOriginY();
-          double pdx, pdy;
-          if (!global_plan_.poses.empty() && closest_idx+1 < (int)global_plan_.poses.size()) {
-            pdx = global_plan_.poses[closest_idx+1].pose.position.x - global_plan_.poses[closest_idx].pose.position.x;
-            pdy = global_plan_.poses[closest_idx+1].pose.position.y - global_plan_.poses[closest_idx].pose.position.y;
-          } else { pdx = cos(current_theta); pdy = sin(current_theta); }
-          double nl = std::hypot(pdx, pdy); if (nl > 0.01) { pdx /= nl; pdy /= nl; }
-          double maxf = std::min(0.50, std::hypot(final_goal_x_-target_x, final_goal_y_-target_y));
-          for (double dd = 0; dd <= maxf && !found; dd += 0.10) {
-            double cx = target_x + dd*pdx, cy = target_y + dd*pdy;
-            bool safe = true;
-            double flx=footprint_front_+footprint_back_, fly=footprint_left_+footprint_right_;
-            double sp=footprint_sample_spacing_;
-            int nx=std::max(2,std::min(12,(int)std::ceil(flx/sp)+1)), ny=std::max(2,std::min(12,(int)std::ceil(fly/sp)+1));
-            double sx=(nx>1)?flx/(nx-1):0, sy=(ny>1)?fly/(ny-1):0;
-            for (int iy=0; iy<ny && safe; ++iy) { double fy=-footprint_right_+iy*sy;
-              for (int ix=0; ix<nx && safe; ++ix) { double fx=-footprint_back_+ix*sx;
-                double wx=cx+fx*cos(current_theta)-fy*sin(current_theta);
-                double wy=cy+fx*sin(current_theta)+fy*cos(current_theta);
-                int mx=(wx-ox)/r, my=(wy-oy)/r;
-                if ((mx>=0&&mx<w&&my>=0&&my<h ? d[my*w+mx] : (unsigned char)255) >= nav2_costmap_2d::LETHAL_OBSTACLE) safe = false;
-              }}
-            if (safe) { bx = cx; by = cy; found = true; }
-          }
-          if (found && !lateral_locked_) { lateral_target_x_ = bx; lateral_target_y_ = by; }
-        }
-      }
-      if (found) {
-        double dx = bx - current_x, dy = by - current_y, dist = std::hypot(dx, dy);
-        // 同时对齐 goal yaw
-        double gy = tf2::getYaw(global_plan_.poses.back().pose.orientation);
-        double ye = gy - current_theta;
-        while (ye > M_PI) ye -= 2.0*M_PI; while (ye < -M_PI) ye += 2.0*M_PI;
-        cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, terminal_angle_kp_ * ye));
-        if (dist < 0.05) {
-          lateral_reach_time_ = now_sec;
-          lateral_locked_ = false; lateral_target_x_ = 0; lateral_target_y_ = 0;
-        }
-        else { double c=cos(-current_theta), s=sin(-current_theta), sp=max_v_;
-          double rvx = ((dx/dist)*c-(dy/dist)*s)*sp;
-          double rvy = ((dx/dist)*s+(dy/dist)*c)*sp;
-          cmd_vel.twist.linear.x = std::max(min_v_, std::min(max_v_, rvx));
-          cmd_vel.twist.linear.y = std::max(-max_vy_, std::min(max_vy_, rvy)); }
-      }
-      if (found && vis_pub_) { visualization_msgs::msg::MarkerArray ma; auto now=node_.lock()->now();
-        visualization_msgs::msg::Marker m; m.header.frame_id="odom"; m.header.stamp=now;
-        m.ns="lateral"; m.id=400; m.type=m.CUBE; m.action=m.ADD;
-        m.pose.position.x=bx; m.pose.position.y=by; m.pose.position.z=0.05;
-        tf2::Quaternion q; q.setRPY(0,0,current_theta); m.pose.orientation=tf2::toMsg(q);
-        m.scale.x=footprint_front_+footprint_back_; m.scale.y=footprint_left_+footprint_right_; m.scale.z=0.05;
-        m.color.a=0.6f; m.color.r=0.5f; m.color.g=0; m.color.b=1; m.lifetime=rclcpp::Duration::from_seconds(0.1);
         ma.markers.push_back(m); vis_pub_->publish(ma); }
       return cmd_vel;
     }
@@ -1194,6 +1097,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
           } // robot_arc scope
           break;
         case NarrowSubState::ALIGN:
+          // 180° 对称: 框体 θ 与 θ+π 等价, 旋转量永不超 90°
           {double ye=narrow_box_target_theta_-current_theta;while(ye>M_PI)ye-=2.0*M_PI;while(ye<-M_PI)ye+=2.0*M_PI;
           if(ye>M_PI_2)ye-=M_PI;else if(ye<-M_PI_2)ye+=M_PI;
           if(std::abs(ye)<0.05){narrow_sub_state_=NarrowSubState::ADVANCE;cmd_vel.twist.angular.z=0;}
@@ -2088,6 +1992,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       }
     }
     double he = std::atan2(path_direction_y, path_direction_x) - current_theta;
+    prev_bc_ = gpu_success ? min_cost : 0.0f;
     logger_.logFrame(stats_frame_count_, best_vx, best_vy, best_omega,
       std::hypot(target_x - current_x, target_y - current_y), dfv,
       (enable_stats_ && !stats_frames_.empty()) ? stats_frames_.back().cross_track_err : 0.0,
