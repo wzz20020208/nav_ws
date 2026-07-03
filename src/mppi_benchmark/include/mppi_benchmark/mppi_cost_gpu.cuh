@@ -23,8 +23,8 @@
 #endif
 
 #define GOAL_ANGLE_THRESHOLD  0.5f
-#define PATH_ANGLE_THRESHOLD  0.785f
-#define HEADING_ANNEAL_DIST   0.5f
+#define PATH_ANGLE_THRESHOLD  0.262f
+#define HEADING_ANNEAL_DIST   1.0f
 
 // ════════════════════════════════════════════
 // GPU 工具函数
@@ -35,6 +35,15 @@ __device__ inline float gpu_normalize_angle(float angle)
   while (angle > M_PI_F)  angle -= 2.0f * M_PI_F;
   while (angle < -M_PI_F) angle += 2.0f * M_PI_F;
   return angle;
+}
+
+/// 180° 对称角度差: 框体 θ 与 θ+π 等价, 选 ≤90° 的最短旋转
+__device__ inline float gpu_sym_angle_diff(float a, float b)
+{
+  float d = gpu_normalize_angle(a - b);
+  if (d > M_PI_F / 2.0f)       d -= M_PI_F;
+  else if (d < -M_PI_F / 2.0f) d += M_PI_F;
+  return d;
 }
 
 __device__ float gpu_point_to_segment_dist_sq(
@@ -131,18 +140,18 @@ __device__ float compute_path_angle_cost_gpu(
     float theta, float path_tangent, float goal_yaw,
     float dist_to_final, int horizon)
 {
+  // GoalAngleCritic 区域: 余弦退火 + 180° 对称
   if (dist_to_final < GOAL_ANGLE_THRESHOLD) {
     float t = fminf(1.0f, dist_to_final / HEADING_ANNEAL_DIST);
     float alpha = (1.0f + cosf(M_PI_F * t)) * 0.5f;
-    float diff = gpu_normalize_angle(goal_yaw - path_tangent);
+    float diff = gpu_sym_angle_diff(goal_yaw, path_tangent);
     float target = path_tangent + alpha * diff;
-    float err = gpu_normalize_angle(theta - target);
+    float err = gpu_sym_angle_diff(theta, target);
     return err * err / static_cast<float>(horizon);
   }
-  float err = gpu_normalize_angle(theta - path_tangent);
-  if (fabsf(err) > PATH_ANGLE_THRESHOLD)
-    return err * err / static_cast<float>(horizon);
-  return 0.0f;
+  // PathAngleCritic 区域: 180° 对称 — 连续惩罚, 角度越大代价越高
+  float err = gpu_sym_angle_diff(theta, path_tangent);
+  return err * err / static_cast<float>(horizon);
 }
 
 // ════════════════════════════════════════════
@@ -160,8 +169,9 @@ __device__ float compute_speed_reward_gpu(
   while (angle_err > M_PI_F)  angle_err -= 2.0f * M_PI_F;
   while (angle_err < -M_PI_F) angle_err += 2.0f * M_PI_F;
   float alignment = cosf(angle_err);
+  // 背离前瞻点 (>90°): 5倍重罚, 防止反向
   if (alignment < 0.0f) return speed * 5.0f;
-  return -speed * alignment + speed * fabsf(sinf(angle_err));
+  return -speed * alignment + 2.0f * speed * fabsf(sinf(angle_err));
 }
 
 __device__ float compute_terminal_dist_cost_gpu(float x, float y, float gx, float gy)

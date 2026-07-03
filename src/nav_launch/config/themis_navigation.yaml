@@ -24,6 +24,8 @@ bt_navigator:
     odom_topic: /odom
     bt_loop_duration: 10
     default_server_timeout: 20
+    default_nav_to_pose_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/src/nav2_custom_plugins/behavior_trees/navigate_to_pose_w_diag_recovery.xml"
+    default_nav_through_poses_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/src/nav2_custom_plugins/behavior_trees/navigate_to_pose_w_diag_recovery.xml"
     navigators: ['navigate_to_pose', 'navigate_through_poses']
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
@@ -33,22 +35,34 @@ bt_navigator:
       plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
 
 # ----------------- 规划器 (全局路径规划) -----------------
-# NavfnPlanner: 基于势场的 Dijkstra 全局规划器。
-# 全向机器人的运动学约束由 MPPI 局部控制器处理，全局规划只需
-# 提供无碰撞的路径走廊。势场法生成的路径天然平滑，不会因
-# 平滑器引入额外偏移。
-# 碰撞箱半尺寸与 MPPI controller footprint 保持一致：
-#   front/back=0.20m → x=±0.20m, left/right=0.30m → y=±0.30m
+# SmacPlanner2D: Nav2 最通用的 2D A* 全局规划器。
+# 基于 costmap 的 8-connected A* 搜索，碰撞检测由 costmap
+# 膨胀层提供——机器人碰撞箱通过 inflation_radius 隐式处理。
+# 全向机器人的运动学约束由 MPPI 局部控制器处理。
+# cost_travel_multiplier=2.0 引导路径远离高代价区域，
+# 与 inflation 层配合实现有效的碰撞箱体避障。
 planner_server:
   ros__parameters:
     expected_planner_frequency: 10.0
     use_sim_time: true
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner/NavfnPlanner"
+      plugin: "nav2_smac_planner/SmacPlanner2D"
       tolerance: 0.5
-      use_astar: false                 # Dijkstra（势场法），路径平滑无锯齿
       allow_unknown: true
+      max_iterations: -1                # 无迭代上限
+      max_on_approach_iterations: 1000  # 接近目标后继续尝试
+      max_planning_time: 2.0            # 最大规划时间 (s)
+      cost_travel_multiplier: 2.0       # >1 避开高代价区域, 0=纯A*
+      use_final_approach_orientation: false
+      # SmacPlanner2D 内置平滑器
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
+        refinement_num: 2
 
 # ----------------- 控制器 (局部路径规划) -----------------
 controller_server:
@@ -96,7 +110,7 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       obstacle_weight: 10.0        # ObstaclesCritic: 碰撞检测 (norm^4)
       tracking_weight: 30.0        # PathAlignCritic + PathAngleCritic + GoalAngleCritic
-      progress_weight: 1.5         # PreferForwardCritic + GoalCritic (压低→减弱推头)
+      progress_weight: 30.0         # PreferForwardCritic + GoalCritic (提高→增强转弯跟随)
 
       # ════════════════════════════════════════════════════════════════
       # 预测时空 (dt × horizon × max_v = 有效预测距离)
@@ -114,7 +128,7 @@ controller_server:
       # 噪声 (采样侧)
       # ════════════════════════════════════════════════════════════════
       action_std_v: 0.5           # vx 噪声 (平衡: 够覆盖 max_v 又不大量后退)
-      action_std_vy: 0.3
+      action_std_vy: 0.5
       action_std_w: 0.4
       nln_ratio: 0.35             # 对数正态占比
       noise_decay_rate: 0.55      # 时间衰减
@@ -128,7 +142,7 @@ controller_server:
       # ════════════════════════════════════════════════════════════════
       #   vx/vy = (1-γ)×(base+noise) + γ×(path_dir×speed)
       #   γ=0: 纯采样, γ=1: 纯路径锚定
-      guidance_weight: 0.2       # 引导强度: 降低 vx 偏置, 给 vy 更多自由度
+      guidance_weight: 0.0       # 引导强度: 降低 vx 偏置, 给 vy 更多自由度
 
       # ════════════════════════════════════════════════════════════════
       # 转弯横向增强 (采样侧: 急弯时自动放大横向运动)
@@ -150,7 +164,7 @@ controller_server:
       footprint_left: 0.28
       footprint_right: 0.28
       footprint_sample_spacing: 0.04
-      rear_obstacle_cost: 200.0    # 后方隐形障碍地板 (0~255, 0=禁用)
+      rear_obstacle_cost: 0.0       # 后方隐形障碍地板 (已移除)
 
       # ════════════════════════════════════════════════════════════════
       # 前瞻点决策
@@ -209,15 +223,17 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]
-    spin:
-      plugin: "nav2_behaviors/Spin"
+    behavior_plugins: ["escape", "backup", "drive_on_heading"]
+    escape:
+      plugin: "nav2_custom_plugins/EscapeObstacle"
+      escape_distance: 0.10
+      scan_radius: 0.15
+      scan_directions: 12
+      escape_speed: 0.10
     backup:
       plugin: "nav2_behaviors/BackUp"
     drive_on_heading:
       plugin: "nav2_behaviors/DriveOnHeading"
-    wait:
-      plugin: "nav2_behaviors/Wait"
     global_frame: odom
     robot_base_frame: BASE_LINK
     transform_tolerance: 0.1

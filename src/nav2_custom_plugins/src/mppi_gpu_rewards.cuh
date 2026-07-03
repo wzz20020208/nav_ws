@@ -24,7 +24,7 @@
 
 // nav2 默认阈值
 #define GOAL_ANGLE_THRESHOLD  0.5f   // 距终点此距离内激活 GoalAngle
-#define PATH_ANGLE_THRESHOLD  0.785f // 朝向偏差超此值(45°)触发 PathAngle 惩罚
+#define PATH_ANGLE_THRESHOLD  0.262f // 朝向偏差超此值(15°)触发 PathAngle 惩罚
 #define HEADING_ANNEAL_DIST   0.5f   // 余弦退火距离
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -87,29 +87,25 @@ __device__ float compute_path_align_cost(
   return min_sq / static_cast<float>(horizon);
 }
 
-/// PathAngleCritic: 朝向与路径切线偏差 > 阈值时惩罚 (nav2 默认: 45°=0.785rad)
-/// 仅在距终点 > GOAL_ANGLE_THRESHOLD 时激活
-/// 余弦退火: 近终点时从路径切线平滑过渡到 goal_yaw
+/// PathAngleCritic: 朝向与路径切线偏差惩罚 + 余弦退火到 goal_yaw
+/// 180° 对称: 框体机器人 θ 与 θ+π 等价，始终选旋转量 ≤90° 的朝向
 __device__ float compute_path_angle_cost(
     float theta, float path_tangent, float goal_yaw,
     float dist_to_final, int horizon)
 {
   // GoalAngleCritic 区域: 距终点 < GOAL_ANGLE_THRESHOLD
   if (dist_to_final < GOAL_ANGLE_THRESHOLD) {
-    // 余弦退火: t=1(远)→0, t=0(近)→1
     float t = fminf(1.0f, dist_to_final / HEADING_ANNEAL_DIST);
     float alpha = (1.0f + cosf(CUDART_PI_F * t)) * 0.5f;
-    float diff = normalize_angle(goal_yaw - path_tangent);
+    float diff = sym_angle_diff(goal_yaw, path_tangent);
     float target = path_tangent + alpha * diff;
-    float err = normalize_angle(theta - target);
+    float err = sym_angle_diff(theta, target);
     return err * err / static_cast<float>(horizon);
   }
 
-  // PathAngleCritic 区域: 偏差 > 阈值才惩罚 (nav2: power=1, 我们简化为 power=2)
-  float err = normalize_angle(theta - path_tangent);
-  if (fabsf(err) > PATH_ANGLE_THRESHOLD)
-    return err * err / static_cast<float>(horizon);
-  return 0.0f;
+  // PathAngleCritic 区域: 180° 对称 — 连续惩罚, 角度越大代价越高
+  float err = sym_angle_diff(theta, path_tangent);
+  return err * err / static_cast<float>(horizon);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -135,14 +131,11 @@ __device__ float compute_speed_reward(
 
   float alignment = cosf(angle_err);  // 1=完美对齐, 0=垂直, -1=完全背离
 
-  // 背离前瞻点 (>90°): 5倍重罚
+  // 背离前瞻点 (>90°): 5倍重罚, 防止反向
   if (alignment < 0.0f) return speed * 5.0f;
 
-  // 奖励速度的对齐分量, 惩罚侧向浪费
-  // 完美对齐 (err=0):   cost = -speed        → 越快越好
-  // 45°偏差:            cost ≈ 0            → 速度无影响
-  // 45°~90°偏差:        cost > 0            → 减速才有利 → 迫使转向对齐
-  return -speed * alignment + speed * fabsf(sinf(angle_err));
+  // 奖励对齐分量, 重罚正交分量 (2× 增强横向抑制)
+  return -speed * alignment + 2.0f * speed * fabsf(sinf(angle_err));
 }
 
 /// GoalCritic: 终端距离代价

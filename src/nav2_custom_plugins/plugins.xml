@@ -26,6 +26,15 @@
     </description>
   </class>
 
+  <class name="nav2_custom_plugins/EscapeObstacle"
+         type="nav2_custom_plugins::EscapeObstacle"
+         base_class_type="nav2_core::Behavior">
+    <description>
+      简单避障恢复行为。扫描周围方向找到最近障碍物，
+      向反方向移动 10cm 后返回成功。
+    </description>
+  </class>
+
 </library>
 
 <library path="nav2_custom_plugins_gpu">

@@ -13,6 +13,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav2_core REQUIRED)
+find_package(nav2_behaviors REQUIRED)
 find_package(nav2_costmap_2d REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -28,6 +29,7 @@ add_library(${PROJECT_NAME}_core SHARED
     src/mpc_controller.cpp
     src/mppi_controller.cpp
     src/is_progress_diagnosis.cpp
+    src/escape_obstacle.cpp
   )
 
 # 3. 设置头文件路径
@@ -39,6 +41,7 @@ target_include_directories(${PROJECT_NAME}_core PUBLIC
 # 4. 链接依赖项
 ament_target_dependencies(${PROJECT_NAME}_core
   rclcpp
+  nav2_behaviors
   nav2_core
   nav2_costmap_2d
   pluginlib

@@ -15,8 +15,8 @@
 #endif
 
 #define GOAL_ANGLE_THRESHOLD  0.5f
-#define PATH_ANGLE_THRESHOLD  0.785f
-#define HEADING_ANNEAL_DIST   0.5f
+#define PATH_ANGLE_THRESHOLD  0.262f
+#define HEADING_ANNEAL_DIST   1.0f
 
 /// 角度归一化到 [-π, π]
 inline float normalize_angle(float angle)

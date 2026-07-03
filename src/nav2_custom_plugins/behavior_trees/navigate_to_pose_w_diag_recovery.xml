@@ -1,21 +1,10 @@
 <!--
-  诊断驱动恢复行为树 (NavigateToPose)
+  简化恢复行为树 (NavigateToPose)
 
-  基于标准 navigate_to_pose_w_replanning_and_recovery.xml，
-  将固定顺序的 RoundRobin recovery 替换为诊断驱动路由:
-
-    AdaptiveProgressChecker 发布 /progress_checker_diagnosis
-      → IsProgressDiagnosis BT 节点读取
-        → Fallback 路由到对应 recovery behavior:
-          · "oscillation" → Spin (旋转换方向)
-          · "retreating"  → BackUp (倒退)
-          · "timeout"     → ClearCostmap + Spin (清零+旋转)
-          · 兜底         → RoundRobin(Spin, Wait, BackUp)
-
-  使用方式:
-    bt_navigator:
-      ros__parameters:
-        default_nav_to_pose_bt_xml: /path/to/navigate_to_pose_w_diag_recovery.xml
+  当全局规划器无法找到路径时，按顺序尝试:
+    1. EscapeObstacle — 向最近障碍物反方向移动 10cm
+    2. BackUp — 倒退 30cm
+    3. 清代价地图 + BackUp — 清除后倒退
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -33,48 +22,20 @@
         </RecoveryNode>
       </PipelineSequence>
 
-      <!-- ═══════════════════════════════════════════════════════════ -->
-      <!-- 诊断驱动 Recovery 子树 (替换标准 RoundRobin)               -->
-      <!-- ═══════════════════════════════════════════════════════════ -->
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
 
-        <Fallback name="DiagRecovery">
-
-          <!-- 振荡 → 旋转换方向 -->
-          <Sequence name="DiagOscillation">
-            <IsProgressDiagnosis expected="oscillation"/>
-            <Spin spin_dist="0.785"/>
-          </Sequence>
-
-          <!-- 退行/绕圈 → 倒退 -->
-          <Sequence name="DiagRetreating">
-            <IsProgressDiagnosis expected="retreating"/>
-            <BackUp backup_dist="0.50" backup_speed="0.10"/>
-          </Sequence>
-
-          <!-- 超时 → 清代价地图 + 旋转 -->
-          <Sequence name="DiagTimeout">
-            <IsProgressDiagnosis expected="timeout"/>
-            <Sequence name="ClearAndSpin">
-              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <Spin spin_dist="1.57"/>
-            </Sequence>
-          </Sequence>
-
-          <!-- 兜底: 传统 RoundRobin (诊断话题未发布或匹配失败时) -->
-          <RoundRobin name="RecoveryFallbackActions">
-            <Sequence name="ClearingActions">
-              <ClearEntireCostmap name="ClearLocalCostmap-Fallback" service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Fallback" service_name="global_costmap/clear_entirely_global_costmap"/>
-            </Sequence>
-            <Spin spin_dist="1.57"/>
-            <Wait wait_duration="5"/>
+        <RoundRobin name="RecoveryActions">
+          <DriveOnHeading dist_to_travel="0.10" speed="0.10"
+            time_allowance="10" server_name="escape"/>
+          <BackUp backup_dist="0.30" backup_speed="0.10"/>
+          <Sequence name="ClearAndBackup">
+            <ClearEntireCostmap name="ClearLocalCostmap" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap" service_name="global_costmap/clear_entirely_global_costmap"/>
             <BackUp backup_dist="0.30" backup_speed="0.05"/>
-          </RoundRobin>
+          </Sequence>
+        </RoundRobin>
 
-        </Fallback>
       </ReactiveFallback>
     </RecoveryNode>
   </BehaviorTree>

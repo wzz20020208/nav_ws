@@ -28,6 +28,9 @@
 /** @brief 2π，角度归一化周期 */
 #define TWO_PI_F (2.0f * M_PI_F)
 
+/** @brief π/2，180° 对称分界 */
+#define M_PI_2_F (M_PI_F / 2.0f)
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 工具函数
 // ═══════════════════════════════════════════════════════════════════════════
@@ -45,6 +48,15 @@ __device__ inline float normalize_angle(float angle)
   while (angle > M_PI_F)  angle -= TWO_PI_F;
   while (angle < -M_PI_F) angle += TWO_PI_F;
   return angle;
+}
+
+/// 180° 对称角度差: 框体 θ 与 θ+π 等价, 选 ≤90° 的最短旋转
+__device__ inline float sym_angle_diff(float a, float b)
+{
+  float d = normalize_angle(a - b);
+  if (d > M_PI_2_F)       d -= M_PI_F;
+  else if (d < -M_PI_2_F) d += M_PI_F;
+  return d;
 }
 
 /**

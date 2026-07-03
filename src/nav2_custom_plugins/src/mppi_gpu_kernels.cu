@@ -85,8 +85,10 @@ __global__ void mppi_sample_kernel(
   float lh_vx_r = tx_r / fmaxf(lh_dist, 1e-6f);
   float lh_vy_r = ty_r / fmaxf(lh_dist, 1e-6f);
 
-  // ── omega 引导 ──
+  // ── omega 引导 (180° 对称: 框体 θ 与 θ+π 等价, 旋转量 ≤90°) ──
   float path_angle_err = atan2f(path_vy_r, path_vx_r);
+  if (path_angle_err > CUDART_PI_F / 2.0f)       path_angle_err -= CUDART_PI_F;
+  else if (path_angle_err < -CUDART_PI_F / 2.0f) path_angle_err += CUDART_PI_F;
 
   // ── 初始状态 ──
   float x = current_x, y = current_y, theta = current_theta;
