@@ -21,9 +21,10 @@ int mppi_gpu_sample_and_cost(
     int costmap_w, int costmap_h,
     float costmap_res, float costmap_origin_x, float costmap_origin_y,
     float dt, float min_v, float max_v, float max_vy, float max_w,
-    float obstacle_weight, float tracking_weight, float progress_weight,
-    float path_dir_x, float path_dir_y, float guidance_weight,
-    float cross_track_noise_scale, float noise_decay_rate,
+    float cost_scale, float obstacle_ratio, float tracking_ratio, float speed_ratio,
+    float path_deviation_weight, float path_corridor,
+    float path_dir_x, float path_dir_y,
+    float noise_decay_rate,
     float exploration_range_scale, float spatial_decay_weight,
     float noise_scale_floor_vx, float noise_scale_floor_vy, float noise_scale_floor_w,
     float pure_rotation_ratio, int pure_rotation_steps, float pure_rotation_w_boost,
@@ -167,7 +168,6 @@ void MPPIGPUController::configure(
   // ── 声明并加载所有可配置参数 ──
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "lookahead_time",               lookahead_time_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "min_lookahead_dist",           min_lookahead_dist_);
-  DECLARE_GET_PARAM(node_ptr, plugin_name_, "guidance_weight",              guidance_weight_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "cross_track_noise_scale",      cross_track_noise_scale_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "noise_decay_rate",             noise_decay_rate_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "lateral_guidance_scale",       lateral_guidance_scale_);
@@ -199,6 +199,7 @@ void MPPIGPUController::configure(
 
   // 前瞻点 KP 减速
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "lookahead_kp",                 lookahead_kp_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "lookahead_decel_dist",         lookahead_decel_dist_);
 
   // 朝向偏差限速
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "enable_heading_speed_limit",   enable_heading_speed_limit_);
@@ -207,6 +208,9 @@ void MPPIGPUController::configure(
 
   // 前瞻点朝向变化率限制 (rad/s)，0=禁用限制
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "lookahead_theta_rate",        lookahead_theta_rate_);
+
+  // 窄道模式开关
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "enable_narrow_passage",       enable_narrow_passage_);
 
   // 核心 MPPI 参数
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "num_samples",                  num_samples_);
@@ -220,10 +224,13 @@ void MPPIGPUController::configure(
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "action_std_vy",                action_std_vy_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "action_std_w",                 action_std_w_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "lambda",                       lambda_);
-  // ── 三组件代价权重 ──
-  DECLARE_GET_PARAM(node_ptr, plugin_name_, "obstacle_weight",              obstacle_weight_);
-  DECLARE_GET_PARAM(node_ptr, plugin_name_, "heading_weight",               heading_weight_);
-  DECLARE_GET_PARAM(node_ptr, plugin_name_, "time_weight",                  time_weight_);
+  // ── 归一化代价参数 ──
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "cost_scale",                   cost_scale_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "obstacle_ratio",               obstacle_ratio_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "tracking_ratio",               tracking_ratio_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "speed_ratio",                  speed_ratio_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "path_deviation_weight",        path_deviation_weight_);
+  DECLARE_GET_PARAM(node_ptr, plugin_name_, "path_corridor",                path_corridor_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "enable_lateral_bias",          enable_lateral_bias_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "nln_ratio",                    nln_ratio_);
   DECLARE_GET_PARAM(node_ptr, plugin_name_, "nln_sigma_mult",               nln_sigma_mult_);
@@ -290,8 +297,8 @@ void MPPIGPUController::configure(
     ps << std::fixed << std::setprecision(4)
        << "samples=" << num_samples_ << " horizon=" << prediction_horizon_
        << " max_v=" << max_v_ << " max_vy=" << max_vy_
-       << " obs_w=" << obstacle_weight_ << " head_w=" << heading_weight_
-       << " time_w=" << time_weight_ << " guidance_w=" << guidance_weight_;
+       << " cs=" << cost_scale_ << " obs_r=" << obstacle_ratio_
+       << " trk_r=" << tracking_ratio_ << " spd_r=" << speed_ratio_;
     if (logger_.open(log_file_path_, ps.str())) {
       RCLCPP_INFO(node_.lock()->get_logger(), "日志已启用: %s", log_file_path_.c_str());
     }
@@ -337,11 +344,7 @@ void MPPIGPUController::setPlan(const nav_msgs::msg::Path & path)
     double new_gy = path.poses.back().pose.position.y;
     if (std::hypot(new_gx - old_gx, new_gy - old_gy) > 0.10) {
       terminal_angle_active_ = false;
-      narrow_box_locked_ = false;
-      narrow_box_found_ = false;
-      narrow_final_target_ = false;
-      narrow_search_progress_ = 0.0;
-      narrow_sub_state_ = NarrowSubState::SEARCH_BOX;
+      narrow_sub_state_ = NarrowSubState::ROTATE_TO_SIDE;
     }
   }
   global_plan_ = path;
@@ -379,24 +382,23 @@ ControllerState MPPIGPUController::determineState(
       std::abs(heading_err) > heading_misalign_threshold_ * 0.5) {
     return ControllerState::HEADING_MISALIGN;
   }
-  // NARROW_PASSAGE: 框体锁定后 (ALIGN/ADVANCE 执行中) 不允许其他状态介入
-  // SEARCH_BOX 搜索阶段不锁, 搜索失败可自然退回 NORMAL
-  if (prev_state_ == ControllerState::NARROW_PASSAGE && narrow_box_locked_) {
+  // NARROW_PASSAGE: 找到脱离目标后 (ROTATE_TO_SIDE/SEARCH_ESCAPE/SIDESTEP 执行中) 不允许其他状态介入
+  if (prev_state_ == ControllerState::NARROW_PASSAGE) {
     return ControllerState::NARROW_PASSAGE;
   }
-  // ── 候选状态计算 (优先级: 终端 > 朝向 > 窄道 > 正常) ──
+  // ── 候选状态计算 (优先级: 终端 > 窄道 > 朝向 > 正常) ──
   ControllerState candidate = ControllerState::NORMAL;
   // 1. 终端对准: 三个前瞻点都到终点 → 进入终端模式
   if (all_at_end) {
     candidate = ControllerState::TERMINAL_ALIGN;
   }
-  // 2. 朝向修正
+  // 2. 窄道迂回 (优先于朝向修正, 卡死时先脱离)
+  else if (mppi_hesitate) { candidate = ControllerState::NARROW_PASSAGE; }
+  // 3. 朝向修正
   else if (std::abs(heading_err) > heading_misalign_threshold_ &&
            std::hypot(goal_wx - lh_wx, goal_wy - lh_wy) >= 0.5 &&
            (terminal_exit_time_ < 0 || now - terminal_exit_time_ > 0.5)) { candidate = ControllerState::HEADING_MISALIGN; }
-  // 4. 窄道迂回 (at_end=1 时也允许 — 目标在障碍中走不过去)
-  else if (mppi_hesitate) { candidate = ControllerState::NARROW_PASSAGE; }
-  // 5. 正常 MPPI
+  // 4. 正常 MPPI
   else { candidate = ControllerState::NORMAL; }
 
   // ── 状态间保护: 特殊情况之间不允许直接跳转, 必须先回 NORMAL ──
@@ -447,15 +449,15 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
   double target_x = current_x;
   double target_y = current_y;
   int closest_idx = 0;
+  int lh_idx = 0;
 
   if (!global_plan_.poses.empty()) {
     double min_dist = std::numeric_limits<double>::max();
 
-    // 增量式最近路径点搜索：从上一帧的 closest_idx 附近开始，
-    // 避免全局搜索导致的索引跳变（全路径扫描可能跳到不同分支）。
-    // 小窗口前向搜索，确保找到的最近点沿路径推进而非跳变。
-    int search_start = std::max(0, prev_closest_idx_ - 5);
-    for (size_t i = search_start; i < global_plan_.poses.size(); ++i) {
+    // 增量式最近路径点搜索：从上一帧的 closest_idx 开始，
+    // 避免全路径扫描导致的索引跳变。
+    // 只允许向前推进，禁止最近点回退，防止前瞻点"往回跑"。
+    for (size_t i = prev_closest_idx_; i < global_plan_.poses.size(); ++i) {
       double dx = global_plan_.poses[i].pose.position.x - current_x;
       double dy = global_plan_.poses[i].pose.position.y - current_y;
       double dist = std::hypot(dx, dy);
@@ -464,6 +466,8 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
         closest_idx = static_cast<int>(i);
       }
     }
+    // 如果从 prev 开始没找到更近的（距离单调递增），维持上一帧最近点
+    if (closest_idx < prev_closest_idx_) closest_idx = prev_closest_idx_;
     prev_closest_idx_ = closest_idx;
 
     // ── 终端角度对准模式（带迟滞状态）──
@@ -485,7 +489,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     // 前瞻点：从 closest_idx 向后逐个扫描，遇障碍即停，不跳过面前障碍物。
     // 同时满足距离 ≥ min_lookahead_dist_ 且路径中间无障碍。
     int last_idx = static_cast<int>(global_plan_.poses.size()) - 1;
-    int lh_idx = last_idx;
+    lh_idx = last_idx;
 
     // 先建立 costmap 查询 (后续障碍物感知也复用)
     const unsigned char* chk_cm = nullptr; int chk_w = 0, chk_h = 0;
@@ -551,11 +555,11 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     double now_sec = node_.lock()->now().seconds();
     bool near_goal = std::hypot(final_goal_x_ - current_x, final_goal_y_ - current_y) < terminal_angle_dist_;
     double h_err = 0.0;
-    if (!global_plan_.poses.empty() && closest_idx + 1 < static_cast<int>(global_plan_.poses.size())) {
-      double pdx = global_plan_.poses[closest_idx+1].pose.position.x - global_plan_.poses[closest_idx].pose.position.x;
-      double pdy = global_plan_.poses[closest_idx+1].pose.position.y - global_plan_.poses[closest_idx].pose.position.y;
-      double nl = std::hypot(pdx, pdy); if (nl > 0.01) { pdx /= nl; pdy /= nl; }
-      h_err = std::atan2(pdy, pdx) - current_theta;
+    // ── 使用主前瞻点 (lh_idx) 的 SE2 推荐朝向, 与 PathAngle 和 lookahead_theta_ 一致 ──
+    //   closest_idx+1 每帧可能跳变导致 yaw 抖动, lh_idx 在 0.4m 外更稳定
+    if (!global_plan_.poses.empty() && lh_idx < static_cast<int>(global_plan_.poses.size())) {
+      double rec_yaw = tf2::getYaw(global_plan_.poses[lh_idx].pose.orientation);
+      h_err = rec_yaw - current_theta;
       while (h_err > M_PI) h_err -= 2.0*M_PI; while (h_err < -M_PI) h_err += 2.0*M_PI;
     }
     bool at_end = false;
@@ -697,10 +701,11 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
             vd, vw, vh, vr, vox, voy,
             static_cast<float>(dt_), static_cast<float>(min_v_),
             static_cast<float>(max_v_), static_cast<float>(max_vy_), static_cast<float>(max_w_),
-            static_cast<float>(obstacle_weight_), static_cast<float>(heading_weight_),
-            static_cast<float>(time_weight_),
-            static_cast<float>(vpdx), static_cast<float>(vpdy), static_cast<float>(guidance_weight_),
-            static_cast<float>(cross_track_noise_scale_), static_cast<float>(noise_decay_rate_),
+            static_cast<float>(cost_scale_), static_cast<float>(obstacle_ratio_),
+            static_cast<float>(tracking_ratio_), static_cast<float>(speed_ratio_),
+            0.0f, 0.0f,  // 虚拟MPPI无全局路径, 偏离代价禁用
+            static_cast<float>(vpdx), static_cast<float>(vpdy),
+            static_cast<float>(noise_decay_rate_),
             1.0f, static_cast<float>(spatial_decay_weight_),
             static_cast<float>(noise_scale_floor_vx_), static_cast<float>(noise_scale_floor_vy_),
             static_cast<float>(noise_scale_floor_w_),
@@ -739,13 +744,15 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
 
         // 窄道踌躇: 虚拟 MPPI 双低 或 主 MPPI 上一帧代价极高
         // prev_bc_ 高 → 机器人当前位置被堵死, 直接触发
-        if (prev_bc_ > 30.0f)
-          mppi_hesitate = true;
-        else if (proj_arr[0] < 0.10 && proj_arr[1] < 0.10)
-          hesitate_count_++;
-        else
-          hesitate_count_ = 0;
-        if (hesitate_count_ >= 3) mppi_hesitate = true;
+        if (enable_narrow_passage_) {
+          if (prev_bc_ > 30.0f)
+            mppi_hesitate = true;
+          else if (proj_arr[0] < 0.10 && proj_arr[1] < 0.10)
+            hesitate_count_++;
+          else
+            hesitate_count_ = 0;
+          if (hesitate_count_ >= 3) mppi_hesitate = true;
+        }
         // 虚拟 MPPI 诊断日志
         {
           std::ostringstream vos;
@@ -836,9 +843,6 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
                             current_x, current_y);
     { static bool diag_init = false; if (!diag_init) { narrowDiagHdr(); diag_init = true; } }
     narrowDiagRow(now_sec, target_x, target_y, 0.0, at_end, mppi_hesitate?1.0:0.0, state_, current_x, current_y, final_goal_x_, final_goal_y_, std::hypot(final_goal_x_-current_x, final_goal_y_-current_y), near_goal?1:0, lh_cost);
-    // NARROW 锁: 框体锁定后不允许退出
-    if (state_ != ControllerState::NARROW_PASSAGE && narrow_box_locked_)
-      state_ = ControllerState::NARROW_PASSAGE;
     // TERMINAL_ALIGN: 锁定 goal, 纯旋转+平移, 永不退出
     // TERMINAL_ALIGN: 先对齐后平移, 永不退出
     if (state_ == ControllerState::TERMINAL_ALIGN) {
@@ -934,10 +938,12 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       }
       return cmd_vel;
     }
-    // HEADING: 选短弧直接转, 框体保证了两侧安全
+    // HEADING: 检查旋转方向上的障碍物, 防止碰撞箱体碰致命区域
     if (state_ == ControllerState::HEADING_MISALIGN) {
       cmd_vel.twist.linear.x = 0; cmd_vel.twist.linear.y = 0;
-      cmd_vel.twist.angular.z = std::copysign(max_w_, h_err);
+      double rot_sign = (h_err > 0) ? 1.0 : -1.0;
+
+      cmd_vel.twist.angular.z = rot_sign * max_w_;
       if (vis_pub_) { visualization_msgs::msg::MarkerArray ma; auto now=node_.lock()->now();
         visualization_msgs::msg::Marker m; m.header.frame_id="odom"; m.header.stamp=now;
         m.ns="state"; m.id=1; m.type=m.ARROW; m.action=m.ADD;
@@ -949,230 +955,70 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
         ma.markers.push_back(m); vis_pub_->publish(ma); }
       return cmd_vel;
     }
-    // NARROW_PASSAGE
+    // NARROW_PASSAGE: 侧身沿全局路径走
     if (state_ == ControllerState::NARROW_PASSAGE) {
-      nav2_costmap_2d::Costmap2D* cm = costmap_ros_ ? costmap_ros_->getCostmap() : nullptr;
-      const unsigned char* ns_cm = nullptr; int ns_w=0, ns_h=0; float ns_r=0.05f, ns_ox=0, ns_oy=0;
-      if (cm && cm->getCharMap()) { ns_cm=cm->getCharMap(); ns_w=cm->getSizeInCellsX(); ns_h=cm->getSizeInCellsY(); ns_r=cm->getResolution(); ns_ox=cm->getOriginX(); ns_oy=cm->getOriginY(); }
-      double ns_pdx=0, ns_pdy=0;
-      ns_pdx=final_goal_x_-current_x; ns_pdy=final_goal_y_-current_y;
-      double nl=std::hypot(ns_pdx,ns_pdy); if(nl>0.01){ns_pdx/=nl;ns_pdy/=nl;} else{ns_pdx=cos(current_theta);ns_pdy=sin(current_theta);}
-      double nh_lh_x = target_x, nh_lh_y = target_y;
-      { int pl=global_plan_.poses.size()-1; for(int i=closest_idx; i<=pl; ++i){
-          if(std::hypot(global_plan_.poses[i].pose.position.x-current_x,global_plan_.poses[i].pose.position.y-current_y)>=0.20)
-          {nh_lh_x=global_plan_.poses[i].pose.position.x;nh_lh_y=global_plan_.poses[i].pose.position.y;break;}}}
-      // ── 诊断计数器 (每帧 SEARCH_BOX 累计) ──
-      int diag_fp_calls=0, diag_fp_oob=0, diag_fp_lethal=0;
-      int diag_srch_calls=0, diag_srch_ok=0;
-      unsigned char diag_worst_cell=0; // 遇到的最高 costmap cell 值 (>=254 即致命)
-      bool   diag_worst_oob=false;
-      double diag_worst_wx=0, diag_worst_wy=0;
-      auto fp_coll=[&](double cx,double cy,double ct){diag_fp_calls++;if(!ns_cm)return false;double cc=cos(ct),ss=sin(ct);
-        double flx=footprint_front_+footprint_back_,fly=footprint_left_+footprint_right_;
-        // 遍历足迹包围盒内所有 costmap cell, 不遗漏任何致命 cell
-        // 四个角的世界坐标
-        double cx0=cx-footprint_back_*cc+footprint_right_*ss, cy0=cy-footprint_back_*ss-footprint_right_*cc;
-        double cx1=cx-footprint_back_*cc-footprint_left_*ss,  cy1=cy-footprint_back_*ss+footprint_left_*cc;
-        double cx2=cx+footprint_front_*cc-footprint_left_*ss, cy2=cy+footprint_front_*ss+footprint_left_*cc;
-        double cx3=cx+footprint_front_*cc+footprint_right_*ss,cy3=cy+footprint_front_*ss-footprint_right_*cc;
-        double min_wx=std::min({cx0,cx1,cx2,cx3}), max_wx=std::max({cx0,cx1,cx2,cx3});
-        double min_wy=std::min({cy0,cy1,cy2,cy3}), max_wy=std::max({cy0,cy1,cy2,cy3});
-        int mx0=(min_wx-ns_ox)/ns_r, mx1=(max_wx-ns_ox)/ns_r;
-        int my0=(min_wy-ns_oy)/ns_r, my1=(max_wy-ns_oy)/ns_r;
-        if(mx0<0)mx0=0;if(mx1>=ns_w)mx1=ns_w-1;if(my0<0)my0=0;if(my1>=ns_h)my1=ns_h-1;
-        if(mx0>mx1||my0>my1){diag_fp_oob++; return true;}  // 完全越界
-        // 逆变换: 把 cell 中心转到机器人系判断是否在矩形内
-        double fw=footprint_front_, bw=footprint_back_, lw=footprint_left_, rw=footprint_right_;
-        for(int my=my0;my<=my1;++my){
-          for(int mx=mx0;mx<=mx1;++mx){
-            double wx=ns_ox+(mx+0.5)*ns_r, wy=ns_oy+(my+0.5)*ns_r;
-            double dx=wx-cx, dy=wy-cy;
-            double lx=dx*cc+dy*ss, ly=-dx*ss+dy*cc;  // 转到机器人系
-            if(lx>=-bw && lx<=fw && ly>=-rw && ly<=lw){
-              unsigned char cv=ns_cm[my*ns_w+mx];
-              if(cv>=nav2_costmap_2d::LETHAL_OBSTACLE){
-                if(cv>diag_worst_cell){diag_worst_cell=cv;diag_worst_oob=false;diag_worst_wx=wx;diag_worst_wy=wy;}
-                diag_fp_lethal++;
-                return true;}}}}
-        return false;};
-      auto srch=[&](double cx,double cy,double path_tangent,double&ot){
-        diag_srch_calls++;
-        double best_score=1e9; bool found=false;
-        for(int i=0;i<24;++i){double t=i*2.0*M_PI/24.0;if(!fp_coll(cx,cy,t)){
-          double d_cur=std::abs(t-current_theta);if(d_cur>M_PI)d_cur=2.0*M_PI-d_cur;
-          if(d_cur>M_PI_2)d_cur=M_PI-d_cur;
-          double d_path=std::abs(t-path_tangent);if(d_path>M_PI)d_path=2.0*M_PI-d_path;
-          if(d_path>M_PI_2)d_path=M_PI-d_path;
-          double score=d_cur+1.5*d_path;
-          if(score<best_score){best_score=score;ot=t;found=true;}}}
-        if(found) diag_srch_ok++;
-        return found;};
-      bool ndone=false;
-      switch(narrow_sub_state_){
-        case NarrowSubState::SEARCH_BOX:
-          cmd_vel.twist.linear.x=0;cmd_vel.twist.linear.y=0;cmd_vel.twist.angular.z=0;
-          if(narrow_box_locked_){narrow_sub_state_=NarrowSubState::ALIGN;break;}
-          // ── 弧长搜索: 先计算机器人在路径上的弧长投影, 从 pi=0 逐步扫描 ──
-          {double robot_arc=0;
-          {double ft;int pl=global_plan_.poses.size()-1;
-          const double SEARCH_START=0.20, SEARCH_END=1.00;
-          if(narrow_search_progress_>0){
-            robot_arc=narrow_search_progress_;
-          }else{
-            double best_dist=1e9; int best_seg=-1; double best_t=0;
-            for(int pi=0;pi<pl;++pi){
-              double ax=global_plan_.poses[pi].pose.position.x,ay=global_plan_.poses[pi].pose.position.y;
-              double bx=global_plan_.poses[pi+1].pose.position.x,by=global_plan_.poses[pi+1].pose.position.y;
-              double abx=bx-ax,aby=by-ay,ab2=abx*abx+aby*aby;
-              double t=0;if(ab2>1e-9){t=((current_x-ax)*abx+(current_y-ay)*aby)/ab2;
-                if(t<0)t=0;if(t>1)t=1;}
-              double px=ax+t*abx,py=ay+t*aby;
-              double d=std::hypot(current_x-px,current_y-py);
-              if(d<best_dist){best_dist=d;best_seg=pi;best_t=t;}
-            }
-            robot_arc=0;
-            for(int pi=0;pi<best_seg;++pi){
-              robot_arc+=std::hypot(global_plan_.poses[pi+1].pose.position.x-global_plan_.poses[pi].pose.position.x,
-                                     global_plan_.poses[pi+1].pose.position.y-global_plan_.poses[pi].pose.position.y);
-            }
-            if(best_seg>=0){
-              robot_arc+=best_t*std::hypot(global_plan_.poses[best_seg+1].pose.position.x-global_plan_.poses[best_seg].pose.position.x,
-                                            global_plan_.poses[best_seg+1].pose.position.y-global_plan_.poses[best_seg].pose.position.y);
-            }
-          }
-          double next_d=robot_arc+SEARCH_START;
-          // 第一遍: 路径中心线搜索, 从 pi=0 开始
-          {double cum=0;
-          for(int pi=0;pi<pl&&!narrow_box_found_;++pi){
-            double ax=global_plan_.poses[pi].pose.position.x,ay=global_plan_.poses[pi].pose.position.y;
-            double bx=global_plan_.poses[pi+1].pose.position.x,by=global_plan_.poses[pi+1].pose.position.y;
-            double seg=std::hypot(bx-ax,by-ay);
-            while(cum+seg>=next_d&&next_d<=robot_arc+SEARCH_END&&!narrow_box_found_){
-              double t=(next_d-cum)/seg;if(t<0)t=0;if(t>1)t=1;
-              double cx=ax+t*(bx-ax),cy=ay+t*(by-ay);
-              if(srch(cx,cy,atan2(by-ay,bx-ax),ft)){narrow_box_target_x_=cx;narrow_box_target_y_=cy;narrow_box_target_theta_=ft;narrow_box_found_=true;break;}
-              next_d+=0.10;}
-            cum+=seg;if(next_d>robot_arc+SEARCH_END)break;}}
-          // 第二遍: 中心线失败后, 横向偏移 ±6cm 搜索
-          if(!narrow_box_found_){double ft;const double LA[]={0.06,-0.06};
-          next_d=robot_arc+SEARCH_START;
-          {double cum=0;
-          for(int pi=0;pi<pl&&!narrow_box_found_;++pi){
-            double ax=global_plan_.poses[pi].pose.position.x,ay=global_plan_.poses[pi].pose.position.y;
-            double bx=global_plan_.poses[pi+1].pose.position.x,by=global_plan_.poses[pi+1].pose.position.y;
-            double seg=std::hypot(bx-ax,by-ay);double lx=-(by-ay)/seg,ly=(bx-ax)/seg;
-            while(cum+seg>=next_d&&next_d<=robot_arc+SEARCH_END&&!narrow_box_found_){
-              double t=(next_d-cum)/seg;if(t<0)t=0;if(t>1)t=1;
-              double cx=ax+t*(bx-ax),cy=ay+t*(by-ay);
-              for(double lat:LA){double sx=cx+lat*lx,sy=cy+lat*ly;
-                if(srch(sx,sy,atan2(by-ay,bx-ax),ft)){narrow_box_target_x_=sx;narrow_box_target_y_=sy;narrow_box_target_theta_=ft;narrow_box_found_=true;break;}}
-              next_d+=0.10;}
-            cum+=seg;if(next_d>robot_arc+SEARCH_END)break;}}}}
-          if(narrow_box_found_){narrow_box_locked_=true;narrow_sub_state_=NarrowSubState::ALIGN;
-            // 框体离终点很近时直接导向 goal pose, 选最近等效 yaw (考虑 180° 对称)
-            if(std::hypot(narrow_box_target_x_-final_goal_x_,narrow_box_target_y_-final_goal_y_)<0.10){
-              narrow_box_target_x_=final_goal_x_;narrow_box_target_y_=final_goal_y_;
-              double gy=final_goal_yaw_;
-              double d0=std::abs(narrow_box_target_theta_-gy);while(d0>M_PI)d0=2.0*M_PI-d0;
-              double gy2=gy+M_PI;if(gy2>M_PI)gy2-=2.0*M_PI;
-              double d1=std::abs(narrow_box_target_theta_-gy2);while(d1>M_PI)d1=2.0*M_PI-d1;
-              if(d1<d0)gy=gy2;
-              narrow_box_target_theta_=gy;
-            }}
-          else{narrow_search_progress_=robot_arc;} // 记录进度, 下次继续
-          if(enable_file_log_ && logger_.is_open()){std::ostringstream os;
-            os<<(narrow_box_found_?"found":"failed")
-              <<" lh=("<<nh_lh_x<<","<<nh_lh_y<<")"
-              <<" box=("<<narrow_box_target_x_<<","<<narrow_box_target_y_<<") th="<<narrow_box_target_theta_
-              <<" cur=("<<current_x<<","<<current_y<<")"
-              <<" | cmap: w="<<ns_w<<" h="<<ns_h<<" res="<<ns_r<<" ox="<<ns_ox<<" oy="<<ns_oy
-              <<" | diag: srch="<<diag_srch_calls<<" ok="<<diag_srch_ok
-              <<" fp="<<diag_fp_calls<<" oob="<<diag_fp_oob<<" lethal="<<diag_fp_lethal;
-            if(!narrow_box_found_ && diag_srch_calls>0 && diag_srch_ok==0){
-              os<<" | worst_cell="<<(int)diag_worst_cell
-                <<(diag_worst_oob?" OOB":" inmap")
-                <<" wpos=("<<diag_worst_wx<<","<<diag_worst_wy<<")";
-            }
-            logger_.logState("narrow_box",os.str());}
-          } // robot_arc scope
-          break;
-        case NarrowSubState::ALIGN:
-          // 180° 对称: 框体 θ 与 θ+π 等价, 旋转量永不超 90°
-          {double ye=narrow_box_target_theta_-current_theta;while(ye>M_PI)ye-=2.0*M_PI;while(ye<-M_PI)ye+=2.0*M_PI;
-          if(ye>M_PI_2)ye-=M_PI;else if(ye<-M_PI_2)ye+=M_PI;
-          if(std::abs(ye)<0.05){narrow_sub_state_=NarrowSubState::ADVANCE;cmd_vel.twist.angular.z=0;}
-          else cmd_vel.twist.angular.z=std::max(-max_w_,std::min(max_w_,1.5*ye));}
-          break;
-        case NarrowSubState::ADVANCE:
-          {double dx=narrow_box_target_x_-current_x,dy=narrow_box_target_y_-current_y,dist=std::hypot(dx,dy);
-          if(dist<0.05){
-            // 到达框体, 用虚拟 MPPI 验证前瞻点是否恢复正常
-            bool lh_ok=false;
-            if(ns_cm){
-              const int VN=num_samples_;int VH=prediction_horizon_;
-              std::vector<float> vn_vx(VN*VH),vn_vy(VN*VH),vn_w(VN*VH),vb(VH,0),vc(VN);
-              cudaStream_t vs;cudaStreamCreate(&vs);
-              for(int i=0;i<VN*VH;++i){vn_vx[i]=(float)dist_vx_(generator_);vn_vy[i]=(float)dist_vy_(generator_);vn_w[i]=(float)dist_w_(generator_);}
-              int ret=mppi_gpu_sample_and_cost(vn_vx.data(),vn_vy.data(),vn_w.data(),vb.data(),vb.data(),vb.data(),
-                (float)narrow_box_target_x_,(float)narrow_box_target_y_,(float)narrow_box_target_theta_,
-                (float)nh_lh_x,(float)nh_lh_y,ns_cm,ns_w,ns_h,ns_r,ns_ox,ns_oy,
-                (float)dt_,(float)min_v_,(float)max_v_,(float)max_vy_,(float)max_w_,
-                (float)obstacle_weight_,(float)heading_weight_,(float)time_weight_,
-                1,0,(float)guidance_weight_,(float)cross_track_noise_scale_,(float)noise_decay_rate_,1,(float)spatial_decay_weight_,
-                (float)noise_scale_floor_vx_,(float)noise_scale_floor_vy_,(float)noise_scale_floor_w_,
-                0,0,1,(float)lateral_guidance_scale_,0,(float)turn_lateral_boost_,(float)turn_lateral_max_boost_,
-                (float)footprint_front_,(float)footprint_back_,(float)footprint_left_,(float)footprint_right_,
-                (float)footprint_sample_spacing_,(float)rear_obstacle_cost_,
-                nullptr,nullptr,0,0,0,0,0,0,VN,VH,
-                d_noise_vx_,d_noise_vy_,d_noise_w_,d_base_vx_,d_base_vy_,d_base_w_,
-                d_costmap_,d_path_x_,d_path_y_,d_costs_,d_sampled_vx_,d_sampled_vy_,d_sampled_w_,d_traj_x_,d_traj_y_,vs);
-              if(ret==0){cudaMemcpyAsync(vc.data(),d_costs_,VN*sizeof(float),cudaMemcpyDeviceToHost,vs);cudaStreamSynchronize(vs);
-                float mc=vc[0];for(int i=1;i<VN;++i)if(vc[i]<mc)mc=vc[i];
-                ret=mppi_gpu_weighted_sum(d_costs_,d_sampled_vx_,d_sampled_vy_,d_sampled_w_,d_result_seq_,mc,(float)lambda_,VN,VH,vs);
-                if(ret==0){std::vector<float> vr(VH*4);cudaMemcpyAsync(vr.data(),d_result_seq_,VH*4*sizeof(float),cudaMemcpyDeviceToHost,vs);cudaStreamSynchronize(vs);
-                  double wvx=0,wvy=0,ws=0;for(int t=0;t<std::min(3,VH);++t){float sw=vr[t*4+3];if(sw>1e-6f){wvx+=vr[t*4+0]/sw;wvy+=vr[t*4+1]/sw;ws+=1;}}
-                  if(ws>0){wvx/=ws;wvy/=ws;}
-                  double pdx=std::cos(narrow_box_target_theta_),pdy=std::sin(narrow_box_target_theta_);
-                  narrow_verify_speed_ = wvx * pdx + wvy * pdy;  // 记录到 CSV
-                  if(narrow_verify_speed_>=0.10)lh_ok=true;}}
-              cudaStreamDestroy(vs);}
-            if(lh_ok){
-              if(!narrow_final_target_){narrow_final_target_=true;narrow_box_target_x_=nh_lh_x;narrow_box_target_y_=nh_lh_y;narrow_box_target_theta_=tf2::getYaw(global_plan_.poses.back().pose.orientation);narrow_sub_state_=NarrowSubState::ALIGN;}
-              else ndone=true;
-            }else{narrow_box_locked_=false;narrow_box_found_=false;narrow_sub_state_=NarrowSubState::SEARCH_BOX;narrow_verify_speed_=-1.0;}
-            cmd_vel.twist.linear.x=0;cmd_vel.twist.linear.y=0;cmd_vel.twist.angular.z=0;}
-          else{
-            // 障碍物感知: 沿运动方向采样检测, 有障碍时减速
-            double safe_scale = 1.0;
-            if(ns_cm){
-              int n_chk = std::min(5, std::max(2, (int)(dist / 0.10)));
-              for(int k = 1; k <= n_chk; ++k){
-                double alpha = (double)k / n_chk;
-                double chk_x = current_x + dx * alpha;
-                double chk_y = current_y + dy * alpha;
-                if(fp_coll(chk_x, chk_y, current_theta)){
-                  safe_scale = 0.3; break;
-                }
-              }
-            }
-            double c=cos(-current_theta),s=sin(-current_theta),sp=max_v_ * safe_scale;
-            double rvx=((dx/dist)*c-(dy/dist)*s)*sp,rvy=((dx/dist)*s+(dy/dist)*c)*sp;
-            cmd_vel.twist.linear.x=std::max(min_v_,std::min(max_v_,rvx));
-            cmd_vel.twist.linear.y=std::max(-max_vy_,std::min(max_vy_,rvy));cmd_vel.twist.angular.z=0;}}
-          break;
+      // 路径切线方向
+      double path_tangent = current_theta;
+      if (!global_plan_.poses.empty() && closest_idx + 1 < (int)global_plan_.poses.size()) {
+        double px = global_plan_.poses[closest_idx+1].pose.position.x - global_plan_.poses[closest_idx].pose.position.x;
+        double py = global_plan_.poses[closest_idx+1].pose.position.y - global_plan_.poses[closest_idx].pose.position.y;
+        double nl = std::hypot(px, py);
+        if (nl > 0.01) { path_tangent = std::atan2(py, px); px /= nl; py /= nl; }
       }
-      if(ndone){state_=ControllerState::NORMAL;narrow_sub_state_=NarrowSubState::SEARCH_BOX;
-        narrow_box_found_=false;narrow_box_locked_=false;narrow_final_target_=false;hesitate_count_=0;narrow_verify_speed_=-1.0;}
-      if ((narrow_box_found_||narrow_box_locked_) && vis_pub_) {
-        visualization_msgs::msg::MarkerArray ma; auto now=node_.lock()->now();
-        visualization_msgs::msg::Marker m; m.header.frame_id="odom"; m.header.stamp=now;
-        m.ns="narrow"; m.id=100; m.type=m.CUBE; m.action=m.ADD;
-        m.pose.position.x=narrow_box_target_x_; m.pose.position.y=narrow_box_target_y_; m.pose.position.z=0.05;
-        tf2::Quaternion q; q.setRPY(0,0,narrow_box_target_theta_); m.pose.orientation=tf2::toMsg(q);
-        m.scale.x=footprint_front_+footprint_back_; m.scale.y=footprint_left_+footprint_right_; m.scale.z=0.05;
-        m.color.a=0.6f; m.color.g=(narrow_sub_state_==NarrowSubState::ADVANCE)?1:0.5f;
-        m.color.b=(narrow_sub_state_==NarrowSubState::ADVANCE)?0:1; m.lifetime=rclcpp::Duration::from_seconds(0.1);
-        ma.markers.push_back(m); vis_pub_->publish(ma); }
+
+      // 侧身朝向: path_tangent ± π/2, 选旋转量 ≤ 90° 的
+      { double a0=path_tangent-M_PI_2, a1=path_tangent+M_PI_2;
+        auto na=[&](double a){while(a>M_PI)a-=2.0*M_PI;while(a<-M_PI)a+=2.0*M_PI;return a;};
+        a0=na(a0); a1=na(a1);
+        side_yaw_ = (std::abs(na(a0-current_theta))<std::abs(na(a1-current_theta)))?a0:a1; }
+
+      double dist_to_goal = std::hypot(final_goal_x_-current_x, final_goal_y_-current_y);
+
+      // 路径方向 (世界系), body vy>0 应沿此方向移动
+      double pdx = std::cos(path_tangent), pdy = std::sin(path_tangent);
+
+      switch (narrow_sub_state_) {
+        case NarrowSubState::ROTATE_TO_SIDE: {
+          double ye = side_yaw_ - current_theta;
+          while (ye > M_PI) ye -= 2.0*M_PI; while (ye < -M_PI) ye += 2.0*M_PI;
+          if (ye > M_PI_2) ye -= M_PI; else if (ye < -M_PI_2) ye += M_PI;
+          cmd_vel.twist.linear.x = 0; cmd_vel.twist.linear.y = 0;
+          if (std::abs(ye) < 0.05) {
+            cmd_vel.twist.angular.z = 0;
+            narrow_sub_state_ = NarrowSubState::MOVE_ALONG_PATH;
+          } else {
+            cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, 1.5 * ye));
+          }
+          break;
+        }
+        case NarrowSubState::MOVE_ALONG_PATH: {
+          // 路径方向转到 body 系, vy 沿路径侧移
+          double c = std::cos(-current_theta), s = std::sin(-current_theta);
+          double by = pdx*s + pdy*c;  // 路径方向在 body-y 分量
+          cmd_vel.twist.linear.x = 0;
+          cmd_vel.twist.linear.y = std::copysign(max_vy_, by);
+          // 维持侧身朝向
+          double ye = side_yaw_ - current_theta;
+          while (ye > M_PI) ye -= 2.0*M_PI; while (ye < -M_PI) ye += 2.0*M_PI;
+          if (ye > M_PI_2) ye -= M_PI; else if (ye < -M_PI_2) ye += M_PI;
+          cmd_vel.twist.angular.z = std::max(-max_w_, std::min(max_w_, 2.0 * ye));
+          break;
+        }
+      }
+
+      // 退出: 接近终点 → TERMINAL_ALIGN
+      if (dist_to_goal < 0.10) {
+        state_ = ControllerState::TERMINAL_ALIGN;
+        narrow_sub_state_ = NarrowSubState::ROTATE_TO_SIDE;
+        hesitate_count_ = 0;
+      }
+
+      // 诊断日志
+      { std::ostringstream os;
+        os << "sub=" << (int)narrow_sub_state_ << " sy=" << side_yaw_ << " dg=" << dist_to_goal;
+        logger_.logState("narrow_box", os.str()); }
+      narrowDiagRow(node_.lock()->now().seconds(), target_x, target_y, 0.0, false, 0.0,
+        state_, current_x, current_y, final_goal_x_, final_goal_y_, dist_to_goal, 0, 0);
       return cmd_vel;
     }
   }
@@ -1249,11 +1095,8 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     goal_yaw = tf2::getYaw(global_plan_.poses.back().pose.orientation);
   }
 
-  // ── 前瞻点最优摆放朝向搜索 ──
-  // 在前瞻点处采样多个朝向，评估碰撞箱各向异性代价，
-  // 选取代价最小的朝向作为前瞻点位姿接近奖励的目标朝向。
-  // 全向底盘在窄通道中可能需要横着走 (窄边 0.4m 朝墙, 宽边 0.6m 沿通道)。
-  // 特例: 前瞻点即终点时，直接使用目标姿态朝向，不搜索。
+  // ── 前瞻点朝向 (直接使用 SE2 推荐朝向，不做碰撞搜索) ──
+  // 特例: 前瞻点即终点时，直接使用目标姿态朝向。
   {
     double dist_target_to_final = std::hypot(
         target_x - global_plan_.poses.back().pose.position.x,
@@ -1261,105 +1104,13 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     if (dist_target_to_final < 0.01) {
       lookahead_theta_ = goal_yaw;
     } else {
-      lookahead_theta_ = std::atan2(path_direction_y, path_direction_x);  // 默认: 路径方向
-
-      const unsigned char* search_costmap = nullptr;
-      int search_w = 0, search_h = 0;
-      float search_res = 0.05f;
-      float search_ox = 0.0f, search_oy = 0.0f;
-
-      if (costmap_ros_ != nullptr) {
-        auto* cm = costmap_ros_->getCostmap();
-        if (cm != nullptr) {
-          search_costmap = cm->getCharMap();
-          search_w = static_cast<int>(cm->getSizeInCellsX());
-          search_h = static_cast<int>(cm->getSizeInCellsY());
-          search_res = static_cast<float>(cm->getResolution());
-          search_ox = static_cast<float>(cm->getOriginX());
-          search_oy = static_cast<float>(cm->getOriginY());
-        }
-      }
-
-      if (search_costmap != nullptr && search_w > 0 && search_h > 0) {
-        const double fp_front = footprint_front_, fp_back = footprint_back_;
-        const double fp_left = footprint_left_, fp_right = footprint_right_;
-        const double fp_len_x = fp_front + fp_back;
-        const double fp_len_y = fp_left + fp_right;
-        const double FP_SPACING = 0.08;
-        int nx = static_cast<int>(std::ceil(fp_len_x / FP_SPACING)) + 1;
-        int ny = static_cast<int>(std::ceil(fp_len_y / FP_SPACING)) + 1;
-        nx = std::max(2, std::min(nx, 10));
-        ny = std::max(2, std::min(ny, 10));
-        int n_pts = nx * ny;
-        double step_x = (nx > 1) ? fp_len_x / (nx - 1) : 0.0;
-        double step_y = (ny > 1) ? fp_len_y / (ny - 1) : 0.0;
-
-        // 评估给定朝向的碰撞代价 (统一 norm^4, 与 GPU 内核一致)
-        auto eval_theta = [&](double theta) -> double {
-          double cos_t = std::cos(theta);
-          double sin_t = std::sin(theta);
-          double cost_acc = 0.0;
-          for (int iy = 0; iy < ny; ++iy) {
-            double fy = -fp_right + iy * step_y;
-            for (int ix = 0; ix < nx; ++ix) {
-              double fx = -fp_back + ix * step_x;
-              double wx = target_x + fx * cos_t - fy * sin_t;
-              double wy = target_y + fx * sin_t + fy * cos_t;
-              int mx = static_cast<int>((wx - search_ox) / search_res);
-              int my = static_cast<int>((wy - search_oy) / search_res);
-              double val = 255.0;  // 越界视同致命
-              if (mx >= 0 && mx < search_w && my >= 0 && my < search_h) {
-                val = static_cast<double>(search_costmap[my * search_w + mx]);
-              }
-              double norm = val / 255.0;
-              double norm2 = norm * norm;
-              cost_acc += norm2 * norm2;  // norm^4
-            }
-          }
-          return cost_acc / n_pts;  // 平均 norm^6 代价
-        };
-
-        // 评估路径方向代价作为基准
-        double path_dir_theta = std::atan2(path_direction_y, path_direction_x);
-        double path_cost = eval_theta(path_dir_theta);
-
-        // 搜索最优朝向 — 以上一帧结果为起点，避免帧间跳变
-        double seed_theta = has_prev_lookahead_theta_
-            ? prev_lookahead_theta_ : path_dir_theta;
-        double best_theta = seed_theta;
-        double best_cost = eval_theta(seed_theta);
-
-        // 同时评估路径方向
-        if (path_cost < best_cost) {
-          best_cost = path_cost;
-          best_theta = path_dir_theta;
-        }
-
-        const int N_THETA = 24;
-        for (int i = 0; i < N_THETA; ++i) {
-          double theta = i * 2.0 * M_PI / N_THETA;
-          double cost = eval_theta(theta);
-          if (cost < best_cost) {
-            best_cost = cost;
-            best_theta = theta;
-          }
-        }
-
-        // 融合路径方向与最优碰撞朝向
-        double improvement = path_cost - best_cost;
-        double blend_ratio = (improvement > 0.0)
-            ? std::min(1.0, improvement / 0.3)
-            : 0.0;
-        double diff = best_theta - path_dir_theta;
-        while (diff > M_PI) diff -= 2.0 * M_PI;
-        while (diff < -M_PI) diff += 2.0 * M_PI;
-        lookahead_theta_ = path_dir_theta + blend_ratio * diff;
-      }
+      lookahead_theta_ = tf2::getYaw(global_plan_.poses[lh_idx].pose.orientation);
     }
+  }
 
-    // ── 变化率限制: 跨路径重规划保持全局持久朝向，避免突变 ──
-    // lookahead_theta_ 是全局持久变量，仅在每帧按最大速率逐步趋近 raw 值
-    {
+  // ── 变化率限制: 跨路径重规划保持全局持久朝向，避免突变 ──
+  // lookahead_theta_ 是全局持久变量，仅在每帧按最大速率逐步趋近 raw 值
+  {
       double raw_theta = lookahead_theta_;  // 保留搜索+融合后的目标朝向
       auto now = node_.lock()->now();
       double dt = (last_theta_update_time_.nanoseconds() == 0)
@@ -1392,7 +1143,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       }
       prev_lookahead_theta_ = lookahead_theta_;
     }
-  }
+
 
   // 初始化或滚动最优控制序列 (MPPI 标准 warm-start)
   if (!initialized_) {
@@ -1404,8 +1155,12 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     while (angle_diff < -M_PI) angle_diff += 2 * M_PI;
 
     double dist_to_goal = std::hypot(dx, dy);
-    double init_vx = std::min(max_v_, dist_to_goal / dt_);
-    double init_vy = 0.0;
+    // 目标方向在 body 系的分量: cos→前向, sin→侧向
+    double cos_diff = std::cos(angle_diff);
+    double sin_diff = std::sin(angle_diff);
+    double speed = std::min(max_v_, dist_to_goal / dt_);
+    double init_vx = cos_diff * speed;
+    double init_vy = sin_diff * speed;
     double init_omega = std::max(-max_w_, std::min(max_w_, angle_diff / dt_));
 
     for (int i = 0; i < H; ++i) {
@@ -1652,7 +1407,6 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
   }
 
   // ── 动态探索调整: 前瞻点堵塞时扩大采样和噪声 (仅调整采样侧, 不影响代价权重) ──
-  float dyn_guidance       = guidance_weight_ * (1.0f - lookahead_blockage * 0.9f);
   float dyn_explore_scale  = std::max(exploration_range_scale,
                                       0.3f + lookahead_blockage * 0.7f);
   float dyn_noise_vx       = noise_scale_floor_vx_ + lookahead_blockage * 0.4f;
@@ -1684,6 +1438,16 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
   // TERMINAL_ALIGN: 近距离只需短时域预测
   if (state_ == ControllerState::TERMINAL_ALIGN) { H = 3; }
 
+  // ── Guidance 方向: 使用紧邻下一个路径点的 SE2 推荐朝向 (而非远距离 lookahead) ──
+  // 近距离点更及时反映路径方向变化, 有 cross-track error 时 path_vy_r ≠ 0, 驱动 vy 纠正
+  double guidance_dir_x = std::cos(lookahead_theta_);  // fallback
+  double guidance_dir_y = std::sin(lookahead_theta_);
+  if (!global_plan_.poses.empty() && closest_idx + 1 < static_cast<int>(global_plan_.poses.size())) {
+    double next_yaw = tf2::getYaw(global_plan_.poses[closest_idx + 1].pose.orientation);
+    guidance_dir_x = std::cos(next_yaw);
+    guidance_dir_y = std::sin(next_yaw);
+  }
+
   // 创建 CUDA stream
   cudaStream_t stream;
   cudaStreamCreate(&stream);
@@ -1698,12 +1462,13 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       costmap_w, costmap_h,
       costmap_res, costmap_origin_x, costmap_origin_y,
       static_cast<float>(dt_), static_cast<float>(min_v_), static_cast<float>(max_v_), static_cast<float>(max_vy_), static_cast<float>(max_w_),
-      static_cast<float>(obstacle_weight_),
-      static_cast<float>(heading_weight_),
-      static_cast<float>(time_weight_),
-      static_cast<float>(std::cos(lookahead_theta_)), static_cast<float>(std::sin(lookahead_theta_)),
-      dyn_guidance,
-      static_cast<float>(cross_track_noise_scale_),
+      static_cast<float>(cost_scale_),
+      static_cast<float>(obstacle_ratio_),
+      static_cast<float>(tracking_ratio_),
+      static_cast<float>(speed_ratio_),
+      static_cast<float>(path_deviation_weight_),
+      static_cast<float>(path_corridor_),
+      static_cast<float>(guidance_dir_x), static_cast<float>(guidance_dir_y),
       static_cast<float>(noise_decay_rate_),
       dyn_explore_scale,
       static_cast<float>(spatial_decay_weight_),
@@ -1761,6 +1526,39 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
   float min_cost = std::numeric_limits<float>::max();
   if (gpu_success) {
     for (int i = 0; i < N; ++i) { if (host_costs[i] < min_cost) min_cost = host_costs[i]; }
+
+    // ── [临时诊断] vy 采样是否有效 + 最低代价样本第0步的 (vx,vy) ──
+    {
+      static int vydbg_cnt = 0;
+      if (++vydbg_cnt % 10 == 0) {
+        std::vector<float> all_vx(N * H), all_vy(N * H);
+        cudaMemcpy(all_vx.data(), d_sampled_vx_, N * H * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(all_vy.data(), d_sampled_vy_, N * H * sizeof(float), cudaMemcpyDeviceToHost);
+        int argmin = 0; float mc = host_costs[0];
+        float vy_min = 1e9f, vy_max = -1e9f; double vy_absmean = 0.0;
+        for (int i = 0; i < N; ++i) {
+          if (host_costs[i] < mc) { mc = host_costs[i]; argmin = i; }
+          float v = all_vy[i * H];           // 每条样本第0步 vy
+          if (v < vy_min) vy_min = v;
+          if (v > vy_max) vy_max = v;
+          vy_absmean += std::abs(v);
+        }
+        vy_absmean /= N;
+        // 前瞻点在机器人系里的方向 (与 kernel line 77-78 一致)
+        double crot = std::cos(-current_theta), srot = std::sin(-current_theta);
+        double dxt = target_x - current_x, dyt = target_y - current_y;
+        double tx_r = dxt * crot - dyt * srot;   // robot-frame 前瞻点 x (前向)
+        double ty_r = dxt * srot + dyt * crot;   // robot-frame 前瞻点 y (侧向)
+        double lh_ang = std::atan2(ty_r, tx_r);  // 前瞻点相对机器人朝向的夹角
+        RCLCPP_INFO(node_.lock()->get_logger(),
+          "[VYDBG] best(vx0=%.3f vy0=%.3f cost=%.3f) spread=[%.3f,%.3f] |vy|avg=%.3f "
+          "| lh_robot=(%.3f,%.3f) lh_ang=%.1fdeg | base=(vx0=%.3f vy0=%.3f) theta=%.2f lhtheta=%.2f",
+          all_vx[argmin * H], all_vy[argmin * H], mc, vy_min, vy_max, vy_absmean,
+          tx_r, ty_r, lh_ang * 180.0 / M_PI,
+          optimal_vx_seq_[0], optimal_vy_seq_[0], current_theta, lookahead_theta_);
+      }
+    }
+
     ret = mppi_gpu_weighted_sum(d_costs_, d_sampled_vx_, d_sampled_vy_, d_sampled_w_,
         d_result_seq_, min_cost, static_cast<float>(lambda_), N, H, stream);
     if (ret != 0) {
@@ -1826,23 +1624,20 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     optimal_omega_seq_[i] = u_star_w[i];
   }
 
-  // ── 前瞻点 KP 减速 ──
-  // 读取代价地图在前瞻点 (target_x, target_y) 处的代价，
-  // 代价越高速度越低: scale = 1 - cost/254 * (1 - kp)
-  if (costmap_data != nullptr && costmap_w > 0 && costmap_h > 0) {
-    int mx = static_cast<int>((target_x - costmap_origin_x) / costmap_res);
-    int my = static_cast<int>((target_y - costmap_origin_y) / costmap_res);
-    if (mx >= 0 && mx < costmap_w && my >= 0 && my < costmap_h) {
-      unsigned char cost = costmap_data[my * costmap_w + mx];
-      if (cost > 0) {
-        double norm_cost = static_cast<double>(cost) / 254.0;
-        if (norm_cost > 1.0) norm_cost = 1.0;
-        double scale = 1.0 - norm_cost * (1.0 - lookahead_kp_);
-        best_vx *= scale;
-        best_vy *= scale;
-        RCLCPP_DEBUG(node_.lock()->get_logger(),
-          "前瞻点 KP: cost=%d, scale=%.2f, vx=%.2f", cost, scale, best_vx);
-      }
+  // ── 前瞻点距离减速 ──
+  // 靠近前瞻点 (target_x, target_y) 时线性降低速度
+  // scale = kp + (1-kp) × min(1.0, dist/decel_dist)
+  //   dist >= decel_dist → scale=1.0 (不减速)
+  //   dist = 0           → scale=kp  (最低速度比例)
+  {
+    double dist_to_target = std::hypot(target_x - current_x, target_y - current_y);
+    if (dist_to_target < lookahead_decel_dist_) {
+      double ratio = dist_to_target / lookahead_decel_dist_;
+      double scale = lookahead_kp_ + (1.0 - lookahead_kp_) * ratio;
+      best_vx *= scale;
+      best_vy *= scale;
+      RCLCPP_DEBUG(node_.lock()->get_logger(),
+        "前瞻减速: dist=%.2f, scale=%.2f, vx=%.2f", dist_to_target, scale, best_vx);
     }
   }
 
@@ -1932,7 +1727,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
                          target_x, target_y,
                          vis_traj_x, vis_traj_y,
                          vis_samples, vis_best_idx,
-                         "map");
+                         "odom");
   }
 
   // ── 运行时统计数据采集 ──
@@ -2054,7 +1849,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
     // 1. 当前位置 → 前瞻点连线 (橙黄色)
     {
       visualization_msgs::msg::Marker m;
-      m.header.frame_id = "map";
+      m.header.frame_id = "odom";
       m.header.stamp = diag_now;
       m.ns = "push_diag";
       m.id = 0;
@@ -2083,7 +1878,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
         double tip_y = current_y + world_vy * arrow_len;
 
         visualization_msgs::msg::Marker m;
-        m.header.frame_id = "map";
+        m.header.frame_id = "odom";
         m.header.stamp = diag_now;
         m.ns = "push_diag";
         m.id = 1;
@@ -2116,7 +1911,7 @@ geometry_msgs::msg::TwistStamped MPPIGPUController::computeVelocityCommands(
       double tip2_y = base_y + std::sin(lh_angle) * 0.2;
 
       visualization_msgs::msg::Marker m;
-      m.header.frame_id = "map";
+      m.header.frame_id = "odom";
       m.header.stamp = diag_now;
       m.ns = "push_diag";
       m.id = 2;

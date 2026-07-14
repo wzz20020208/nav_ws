@@ -44,12 +44,11 @@ enum class ControllerState : uint8_t
   TERMINAL_ALIGN = 3
 };
 
-/// 窄道子状态
+/// 窄道子状态: 侧身沿路径脱离
 enum class NarrowSubState : uint8_t
 {
-  SEARCH_BOX = 0,
-  ALIGN,
-  ADVANCE
+  ROTATE_TO_SIDE = 0,  // 旋转至路径切线方向 (侧身姿态)
+  MOVE_ALONG_PATH       // 逐帧沿路径侧移, 每 10cm 检测碰撞
 };
 
 /**
@@ -121,15 +120,17 @@ private:
   double nln_sigma_mult_ = 3.0; // 对数正态 sigma 倍数 (越大尾越重)
   double lambda_ = 50.0;
 
-  // ── 三组件代价权重 (仅此三个可调，消除数据竞争) ──
-  double obstacle_weight_ = 40.0;   // 障碍物代价: 越高越保守
-  double heading_weight_ = 5.0;     // 朝向代价:   越高越注重对齐
-  double time_weight_ = 1.0;        // 耗时代价:   越高越快到达目标
+  // ── 归一化代价参数: 占比 (推荐 0.4+0.3+0.3=1.0) + 全局缩放 ──
+  double cost_scale_ = 10.0;        // 全局代价缩放 (调大=更敏感)
+  double obstacle_ratio_ = 0.4;     // 障碍物代价占比 40%
+  double tracking_ratio_ = 0.3;     // 路径跟踪代价占比 30% (PathAlign + PathAngle)
+  double speed_ratio_ = 0.3;        // 速度/进度代价占比 30% (SpeedReward + GoalCritic)
+  double path_deviation_weight_ = 150.0;  // 偏离路径软墙权重 (独立于 cost_scale, 0=禁用)
+  double path_corridor_ = 0.15;     // 偏离免罚回廊半宽 [m], 超出后按超出量² 陡增惩罚
 
   double lookahead_distance_ = 1.0;
   double lookahead_time_ = 2.0;
   double min_lookahead_dist_ = 2.0;
-  double guidance_weight_ = 0.3;  // 路径引导权重: 0=完全跟随base, 1=完全锚定路径
   double cross_track_noise_scale_ = 0.3;
   double noise_decay_rate_ = 0.7;
   double lateral_guidance_scale_ = 0.2; // 横向 guidance 缩放 (0~1)，越小越抑制侧移
@@ -172,7 +173,8 @@ private:
   // ── 前瞻点 KP 减速 ──
   // 读取代价地图在前瞻点处的代价，代价越高速度越低
   // scale = 1 - cost/254 * (1 - kp)
-  double lookahead_kp_ = 0.2;  // 前瞻点遇到致命障碍物时的最低速度比例 (0~1)
+  double lookahead_kp_ = 0.3;         // 靠近前瞻点时最低速度比例 (0~1, 越小减速越猛)
+  double lookahead_decel_dist_ = 0.5; // 前瞻减速起始距离 (m), 距目标 < 此值时线性减速
 
   // ── 朝向偏差限速 ──
   // 当机器人朝向与目标方向偏差超过阈值时，限制矢量速度
@@ -208,16 +210,13 @@ private:
   // ── 状态机 ──
   ControllerState state_ = ControllerState::NORMAL;
   ControllerState prev_state_ = ControllerState::NORMAL;  // 上一帧状态, 用于禁止特殊状态间直接跳转
-  NarrowSubState narrow_sub_state_ = NarrowSubState::SEARCH_BOX;
+  NarrowSubState narrow_sub_state_ = NarrowSubState::ROTATE_TO_SIDE;
+  bool enable_narrow_passage_ = true;     // 是否启用窄道踌躇检测与侧身脱离
 
 
-  // 窄道执行
-  double narrow_box_target_x_ = 0.0, narrow_box_target_y_ = 0.0, narrow_box_target_theta_ = 0.0;
-  bool   narrow_box_found_ = false, narrow_box_locked_ = false, narrow_final_target_ = false;
-  double narrow_entry_cost_ = 1e9;
-  int    narrow_last_closest_ = -1;     // 上一帧 closest_idx, 用于检测搜索是否前进
-  double narrow_search_progress_ = 0.0; // 已搜索过的路径距离, 下次从这之后继续
-  double narrow_verify_speed_ = -1.0;   // 上一次 ADVANCE 验证的投影速度, -1=未验证
+  // 窄道侧身脱离
+  double side_yaw_ = 0.0;              // 侧身朝向 (路径切线 ± π/2)
+  double narrow_verify_speed_ = -1.0;  // 诊断用
 
   // 终端对齐
   double terminal_exit_time_ = -1.0;

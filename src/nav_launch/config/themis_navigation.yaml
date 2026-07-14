@@ -1,253 +1,204 @@
-# ============================================================
-# THEMIS Nav2 导航参数配置
-# 使用方式:
-#   ros2 launch nav_launch themis_navigation.launch.py
-#   ros2 launch nav_launch themis_navigation.launch.py \
-#       params_file:=/path/to/custom_params.yaml
-# ============================================================
-
-# ----------------- 生命周期管理器 -----------------
-lifecycle_manager_navigation:
-  ros__parameters:
-    use_sim_time: true
-    autostart: true
-    node_names: ['controller_server', 'planner_server', 'behavior_server',
-                 'bt_navigator', 'waypoint_follower', 'local_costmap',
-                 'global_costmap']
-
-# ----------------- 行为树导航器 -----------------
 bt_navigator:
   ros__parameters:
-    use_sim_time: true
-    global_frame: map
+    use_sim_time: True
+    global_frame: odom
     robot_base_frame: BASE_LINK
     odom_topic: /odom
-    bt_loop_duration: 10
-    default_server_timeout: 20
-    default_nav_to_pose_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/src/nav2_custom_plugins/behavior_trees/navigate_to_pose_w_diag_recovery.xml"
-    default_nav_through_poses_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/src/nav2_custom_plugins/behavior_trees/navigate_to_pose_w_diag_recovery.xml"
-    navigators: ['navigate_to_pose', 'navigate_through_poses']
-    navigate_to_pose:
-      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
-      goal_reached_tol: 0.25
-      goal_reached_yaw_tol: 0.50
-    navigate_through_poses:
-      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+    thread_count: 8
+    default_nav_to_pose_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/install/navigation/share/navigation/param/auto_nav.xml"
+    default_nav_through_poses_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/install/navigation/share/navigation/param/auto_nav.xml"
+    bt_loop_duration: 100
+    default_server_timeout: 1000
+    enable_groot_monitoring: True
+    groot_zmq_publisher_port: 1666
+    groot_zmq_server_port: 1667
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_drive_on_heading_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+    - custom_planner_bt
 
-# ----------------- 规划器 (全局路径规划) -----------------
-# SmacPlanner2D: Nav2 最通用的 2D A* 全局规划器。
-# 基于 costmap 的 8-connected A* 搜索，碰撞检测由 costmap
-# 膨胀层提供——机器人碰撞箱通过 inflation_radius 隐式处理。
-# 全向机器人的运动学约束由 MPPI 局部控制器处理。
-# cost_travel_multiplier=2.0 引导路径远离高代价区域，
-# 与 inflation 层配合实现有效的碰撞箱体避障。
-planner_server:
+
+bt_navigator_rclcpp_node:
   ros__parameters:
-    expected_planner_frequency: 10.0
-    use_sim_time: true
-    planner_plugins: ["GridBased"]
-    GridBased:
-      plugin: "nav2_smac_planner/SmacPlanner2D"
-      tolerance: 0.5
-      allow_unknown: true
-      max_iterations: -1                # 无迭代上限
-      max_on_approach_iterations: 1000  # 接近目标后继续尝试
-      max_planning_time: 2.0            # 最大规划时间 (s)
-      cost_travel_multiplier: 2.0       # >1 避开高代价区域, 0=纯A*
-      use_final_approach_orientation: false
-      # SmacPlanner2D 内置平滑器
-      smoother:
-        max_iterations: 1000
-        w_smooth: 0.3
-        w_data: 0.2
-        tolerance: 1.0e-10
-        do_refinement: true
-        refinement_num: 2
+    use_sim_time: True
 
-# ----------------- 控制器 (局部路径规划) -----------------
 controller_server:
   ros__parameters:
-    use_sim_time: true
+    use_sim_time: True
     controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 999.0           # 禁用卡死判定：不因控制器失败触发恢复
+    failure_tolerance: 999.0
     progress_checker_plugin: "progress_checker"
     goal_checker_plugins: ["general_goal_checker"]
     controller_plugins: ["FollowPath"]
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.0    # 禁用移动进度检查
-      movement_time_allowance: 999999.0 # 禁用超时判定
+      required_movement_radius: 0.0
+      movement_time_allowance: 999999.0
+
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.20          # 20cm, MPPI 移动容差
-      yaw_goal_tolerance: 0.087       # 5°
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.17
 
     FollowPath:
       plugin: "nav2_custom_plugins/MPPIGPUController"
 
-      # ╔══════════════════════════════════════════════════════════════════╗
-      # ║       MPPI GPU 控制器 — 移植自 nav2_mppi_controller              ║
-      # ╠══════════════════════════════════════════════════════════════════╣
-      # ║                                                                  ║
-      # ║  total_cost = obstacle_weight  × ObstaclesCritic                ║
-      # ║             + tracking_weight  × (PathAlign + PathAngle         ║
-      # ║                                  + GoalAngle)                   ║
-      # ║             + progress_weight  × (PreferForward + GoalCritic)   ║
-      # ║                                                                  ║
-      # ║  参考: nav2 MPPI critics (Williams 2017 MPPI)                    ║
-      # ║    obstacle_weight ↑ → 更保守, 远离障碍                          ║
-      # ║    tracking_weight ↑ → 更贴路径, 朝向对齐                        ║
-      # ║    progress_weight ↑ → 更快/更高效到达目标                        ║
-      # ╚══════════════════════════════════════════════════════════════════╝
+      # 归一化代价: total = cost_scale × (obstacle_ratio·obs + tracking_ratio·trk + speed_ratio·spd) / horizon
+      cost_scale: 30.0
+      obstacle_ratio: 0.10
+      tracking_ratio: 0.30
+      speed_ratio: 0.60
+      # 独立偏离路径代价 (软墙)
+      path_deviation_weight: 0.0
+      path_corridor: 0.15
 
-      # ════════════════════════════════════════════════════════════════
-      # 三组件代价权重
-      # ════════════════════════════════════════════════════════════════
-      obstacle_weight: 10.0        # ObstaclesCritic: 碰撞检测 (norm^4)
-      tracking_weight: 30.0        # PathAlignCritic + PathAngleCritic + GoalAngleCritic
-      progress_weight: 30.0         # PreferForwardCritic + GoalCritic (提高→增强转弯跟随)
-
-      # ════════════════════════════════════════════════════════════════
-      # 预测时空 (dt × horizon × max_v = 有效预测距离)
-      # ════════════════════════════════════════════════════════════════
-      #   dt×H×max_v = 0.1×12×0.4 = 0.48m, 前瞻点 0.4m
       num_samples: 3000
-      prediction_horizon: 12
+      prediction_horizon: 15
       dt: 0.1
       max_v: 0.40
-      min_v: -0.10
+      min_v: -0.40   # 与 max_v 对称
       max_vy: 0.20
-      max_w: 0.36
+      max_w: 0.60
 
-      # ════════════════════════════════════════════════════════════════
-      # 噪声 (采样侧)
-      # ════════════════════════════════════════════════════════════════
-      action_std_v: 0.5           # vx 噪声 (平衡: 够覆盖 max_v 又不大量后退)
+      action_std_v: 0.5
       action_std_vy: 0.5
       action_std_w: 0.4
-      nln_ratio: 0.35             # 对数正态占比
-      noise_decay_rate: 0.55      # 时间衰减
-      noise_scale_floor_vx: 0.35   # vx 探索下限
+      nln_ratio: 0.35
+      noise_decay_rate: 0.55
+      noise_scale_floor_vx: 0.35
       noise_scale_floor_vy: 0.30
       noise_scale_floor_w: 0.30
-      cross_track_noise_scale: 1.5 # 横向噪声缩放
+      cross_track_noise_scale: 1.5
 
-      # ════════════════════════════════════════════════════════════════
-      # 路径引导 (采样侧: 噪声偏置方向, 不影响代价)
-      # ════════════════════════════════════════════════════════════════
-      #   vx/vy = (1-γ)×(base+noise) + γ×(path_dir×speed)
-      #   γ=0: 纯采样, γ=1: 纯路径锚定
-      guidance_weight: 0.0       # 引导强度: 降低 vx 偏置, 给 vy 更多自由度
+      turn_lateral_boost: 2.0
+      lateral_guidance_scale: 0.7   # vx/vy采样向lookahead方向混合比例
 
-      # ════════════════════════════════════════════════════════════════
-      # 转弯横向增强 (采样侧: 急弯时自动放大横向运动)
-      # ════════════════════════════════════════════════════════════════
-      turn_lateral_boost: 2.0      # 转弯增强倍数 (0=关闭)
-      lateral_guidance_scale: 0.7  # 横向 guidance 基值缩放
+      lambda: 2.0     # 稍尖锐, 让低代价样本更有话语权, 避免输出趋于零
 
-      # ════════════════════════════════════════════════════════════════
-      # MPPI 温度
-      # ════════════════════════════════════════════════════════════════
-      #   weight = exp(-cost / lambda). lambda↑ → 代价差异稀释
-      lambda: 1.0
-
-      # ════════════════════════════════════════════════════════════════
-      # 碰撞检测
-      # ════════════════════════════════════════════════════════════════
       footprint_front: 0.17
       footprint_back: 0.17
       footprint_left: 0.28
       footprint_right: 0.28
       footprint_sample_spacing: 0.04
-      rear_obstacle_cost: 0.0       # 后方隐形障碍地板 (已移除)
+      rear_obstacle_cost: 0.0
 
-      # ════════════════════════════════════════════════════════════════
-      # 前瞻点决策
-      # ════════════════════════════════════════════════════════════════
-      min_lookahead_dist: 0.4       # 前瞻距离 (m)
-      lookahead_kp: 1.0             # 前瞻减速 (1.0=不减速)
+      min_lookahead_dist: 0.4
+      lookahead_kp: 1.0
 
-      # ════════════════════════════════════════════════════════════════
-      # 终端行为 (与 general_goal_checker 协调)
-      # ════════════════════════════════════════════════════════════════
-      #   terminal_angle_dist (0.10m): 终端区域代价清零, MPPI 自然对齐
-      #   terminal_angle_tolerance (4°) < yaw_goal_tolerance (5°)
-      terminal_angle_dist: 0.08
-      terminal_angle_kp: 1.5
-      terminal_angle_tolerance: 0.07
+      terminal_angle_dist: 0.0
+      terminal_angle_kp: 0.0
+      terminal_angle_tolerance: 0.0
 
-      # ════════════════════════════════════════════════════════════════
-      # 分层规划
-      # ════════════════════════════════════════════════════════════════
-      #   30% 轨迹直接预测到终点 (终端引导)
-      #   70% 轨迹跟随局部前瞻点 (路径跟踪, 避障)
       global_trajectory_ratio: 0.3
-      global_horizon: 50            # dt×50×max_v = 0.3×50×0.4 = 6.0m 覆盖
+      global_horizon: 50
 
-      # ════════════════════════════════════════════════════════════════
-      # 独立功能开关
-      # ════════════════════════════════════════════════════════════════
-      pure_rotation_ratio: 0.10     # 纯旋转轨迹占比
+      pure_rotation_ratio: 0.10
       pure_rotation_steps: 2
-      enable_lateral_bias: false    # 横向偏好分析
+      enable_lateral_bias: false
       enable_heading_speed_limit: true
-      heading_misalign_threshold: 1.047  # 速度方向偏差阈值 (rad), 60°
+      heading_misalign_threshold: 1.047
+      enable_narrow_passage: false
       enable_ema: false
       ema_alpha: 0.1
 
-      # ╔══════════════════════════════════════════════════════════════════╗
-      # ║                    调参速查 (3 权重优先)                         ║
-      # ╠══════════════════════════════════════════════════════════════════╣
-      # ║ 场景                        调法                                 ║
-      # ║ ────                        ────                                 ║
-      # ║ 离障碍物太近/擦边           obstacle_weight ↑                    ║
-      # ║ 不敢靠近障碍物(过度保守)    obstacle_weight ↓                    ║
-      # ║ 朝向不对/终点对不准         tracking_weight ↑                    ║
-      # ║ 转弯后摆动(过度对齐)        tracking_weight ↓                    ║
-      # ║ 跑得太慢/犹豫               progress_weight ↑                    ║
-      # ║ 跑得太快/冲过头             progress_weight ↓                    ║
-      # ║ 窄通道卡住                  noise_scale_floor_vy ↑               ║
-      # ║ 轨迹末端蛇形                noise_decay_rate ↑, enable_ema=true  ║
-      # ║ 局部极小出不来              nln_ratio ↑                          ║
-      # ║                             global_trajectory_ratio ↑            ║
-      # ╚══════════════════════════════════════════════════════════════════╝
 
-# ----------------- 行为/恢复服务器 -----------------
-behavior_server:
+
+
+controller_server_rclcpp_node:
   ros__parameters:
-    costmap_topic: local_costmap/costmap_raw
-    footprint_topic: local_costmap/published_footprint
-    cycle_frequency: 10.0
-    behavior_plugins: ["escape", "backup", "drive_on_heading"]
-    escape:
-      plugin: "nav2_custom_plugins/EscapeObstacle"
-      escape_distance: 0.10
-      scan_radius: 0.15
-      scan_directions: 12
-      escape_speed: 0.10
-    backup:
-      plugin: "nav2_behaviors/BackUp"
-    drive_on_heading:
-      plugin: "nav2_behaviors/DriveOnHeading"
-    global_frame: odom
-    robot_base_frame: BASE_LINK
-    transform_tolerance: 0.1
-    use_sim_time: true
-    simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    use_sim_time: True
 
-# ----------------- 全局代价地图 -----------------
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 5.0
+      transform_tolerance: 1.0
+      global_frame: odom
+      robot_base_frame: BASE_LINK
+      use_sim_time: True
+      rolling_window: True
+      track_unknown_space: False
+      width: 4
+      height: 4
+      resolution: 0.05
+      footprint: "[ [0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30] ]"
+      footprint_padding: 0.02
+      plugins: ["obstacle_layer", "inflation_layer"]
+
+      
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.25
+        cost_scaling_factor: 5.0
+
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: point_zedxm
+        max_obstacle_height: 0.8
+        min_obstacle_height: 0.1
+        point_zedxm:
+          topic: /chest_camera/points_sparse
+          expected_update_rate: 1.0
+          max_obstacle_height: 0.8
+          min_obstacle_height: -0.1
+          observation_persistence: 0.0
+          clearing: True
+          marking: True
+          raytrace_max_range: 2.0
+          raytrace_min_range: 0.1
+          obstacle_max_range: 2.0
+          obstacle_min_range: 0.1
+          data_type: "PointCloud2"
+
+      always_send_full_costmap: True
+  local_costmap_client:
+    ros__parameters:
+      use_sim_time: True
+  local_costmap_rclcpp_node:
+    ros__parameters:
+      use_sim_time: True
+
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 1.0         # 降低以避免反复重规划打断窄道计时
+      update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
       robot_base_frame: BASE_LINK
@@ -263,82 +214,82 @@ global_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: pointcloud_sensor
-        pointcloud_sensor:
-          topic: /chest_camera/points_sparse
-          data_type: "PointCloud2"
-          max_obstacle_height: 1.7
-          min_obstacle_height: 0.1
-          obstacle_max_range: 3.0
-          raytrace_max_range: 3.5
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
           clearing: True
           marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0     # 衰减更缓 → 路径远离障碍物
-        inflation_radius: 0.50       # > 外接圆 0.36m, 留安全裕量
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.25      # 内接圆0.20m+余量, MPPI处理实际矩形碰撞
 
-# ----------------- 局部代价地图 -----------------
-local_costmap:
-  local_costmap:
-    ros__parameters:
-      update_frequency: 10.0
-      publish_frequency: 10.0
-      global_frame: odom
-      robot_base_frame: BASE_LINK
-      use_sim_time: true
-      rolling_window: true
-      width: 3
-      height: 3
-      resolution: 0.05
-      footprint: "[[0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30]]"
 
-      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: True
-        map_topic: /rtabmap/map
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
-        enabled: True
-        publish_voxel_map: True
-
-        # --- 控制体素网格的整体高度 ---
-        origin_z: 0.0
-        z_resolution: 0.1        # Z轴分辨率 10cm
-        z_voxels: 14             # 14层 * 0.1m = 1.4m 的总网格高度 (覆盖机器人的 1.2m 身高)
-
-        # ★ 核心参数：决定哪些高度的障碍物会被投影到2D地图上
-        max_obstacle_height: 1.7 # 忽略 1.3m 以上的障碍物，允许机器人从下方穿过
-
-        # 未知区域处理（如果雷达扫不到上方，默认上方是安全的）
-        unknown_threshold: 15
-        mark_threshold: 0
-
-        observation_sources: pointcloud_sensor
-        pointcloud_sensor:
-          topic: /chest_camera/points_sparse
-          data_type: "PointCloud2"
-
-          # ★ 核心参数：在数据源头过滤掉不需要关心的高空点云
-          max_obstacle_height: 1.7 # 高于 1.3m 的雷达点云直接扔掉，节省 CPU 算力
-          min_obstacle_height: 0.1 # 过滤掉 0.1m 以下的地面点云
-
-          obstacle_max_range: 3.0
-          raytrace_max_range: 3.5
-          clearing: True
-          marking: True
-      inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 7.0    # 与全局一致, 允许擦边
-        inflation_radius: 0.25
-
-# ----------------- 航点跟随器 -----------------
-waypoint_follower:
+planner_server:
   ros__parameters:
-    loop_rate: 20
-    stop_on_failure: false
-    waypoint_task_executor_plugin: "wait_at_waypoint"
-    wait_at_waypoint:
-      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
-      waypoint_pause_duration: 200
+    use_sim_time: True
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: true
+      allow_unknown: false
+      use_final_approach_orientation: false
+
+      enable_se2_optimization: true
+      se2_resample_resolution: 0.10
+      robot_length: 0.4
+      robot_width: 0.6
+      robot_safe_distance: 0.10
+      se2_iterations: 60
+      se2_learning_rate: 0.02
+      se2_fd_eps: 0.02
+      se2_w_obs: 300.0
+      se2_w_ref: 0.3
+      se2_w_smooth: 20.0
+      se2_w_yaw_smooth: 8.0
+      se2_w_align: 0.4
+      se2_w_step: 2.0
+      se2_max_step: 0.20
+      se2_max_yaw_delta: 0.30
+      se2_w_tangent: 5.0
+      se2_max_optimization_points: 100
+      se2_post_smooth_passes: 2
+      se2_post_smooth_alpha: 0.35
+
+planner_server_rclcpp_node:
+  ros__parameters:
+    use_sim_time: True
+
+
+robot_state_publisher:
+  ros__parameters:
+    use_sim_time: True
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: true 
+    
+    max_velocity: [0.35, 0.05, 0.5]
+    min_velocity: [-0.35, -0.05, -0.5]   # 与 max_velocity 对称
+    
+    max_accel: [1.0, 1.0, 1.0]
+    
+    max_decel: [-2.5, -1.0, -1.0] 
+    
+    deadband_velocity: [0.01, 0.0, 0.01]
+    
+    feedback: OPEN_LOOP
+    velocity_timeout: 1.0
+
+map_server:
+  ros__parameters:
+    yaml_filename: ""
+    topic_name: "/map"
+    frame_id: "odom"

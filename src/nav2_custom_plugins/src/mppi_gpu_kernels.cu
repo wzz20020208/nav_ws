@@ -1,10 +1,12 @@
 /**
  * @file mppi_gpu_kernels.cu
- * @brief MPPI GPU 内核 — 标准三组件代价架构
+ * @brief MPPI GPU 内核 — 归一化三组件代价架构
  *
- *   total = obstacle_weight × obstacle_cost   (碰撞检测)
- *         + tracking_weight × tracking_cost   (cross-track + 余弦退火朝向)
- *         + progress_weight × progress_cost   (速度投影 + 终端距离)
+ *   total = cost_scale × ( obs_ratio × obst_acc / horizon
+ *                         + trk_ratio × track_acc / horizon
+ *                         + spd_ratio × prog_acc / horizon )
+ *
+ *   默认占比: 障碍物 40% / 跟踪 30% / 速度 30%
  */
 
 #include <cuda_runtime.h>
@@ -28,12 +30,14 @@ __global__ void mppi_sample_kernel(
     int costmap_w, int costmap_h,
     float costmap_res, float costmap_origin_x, float costmap_origin_y,
     float dt, float min_v, float max_v, float max_vy, float max_w,
-    // ── 三组件权重 ──
-    float obstacle_weight, float tracking_weight, float progress_weight,
+    // ── 三组件归一化权重 (占比, 推荐 0.4+0.3+0.3) + 全局缩放 ──
+    float cost_scale, float obstacle_ratio, float tracking_ratio, float speed_ratio,
+    // ── 独立偏离路径代价 (软墙, 不受 cost_scale 缩放) ──
+    float path_deviation_weight, float path_corridor,
     // ── 路径引导 ──
-    float path_dir_x, float path_dir_y, float guidance_weight,
+    float path_dir_x, float path_dir_y,
     // ── 噪声采样 ──
-    float cross_track_noise_scale, float noise_decay_rate,
+    float noise_decay_rate,
     float exploration_range_scale, float spatial_decay_weight,
     float noise_scale_floor_vx, float noise_scale_floor_vy, float noise_scale_floor_w,
     float pure_rotation_ratio, int pure_rotation_steps, float pure_rotation_w_boost,
@@ -59,6 +63,9 @@ __global__ void mppi_sample_kernel(
   int s = blockIdx.x * blockDim.x + threadIdx.x;
   if (s >= num_samples) return;
 
+  // 统一 vx/vy 机制后不再使用的参数 (保留签名兼容性)
+  (void)path_turn_angle; (void)turn_lateral_boost; (void)turn_lateral_max_boost;
+
   bool is_global = (s < num_global_trajs);
   float traj_target_x = is_global ? final_goal_x : target_x;
   float traj_target_y = is_global ? final_goal_y : target_y;
@@ -66,33 +73,18 @@ __global__ void mppi_sample_kernel(
 
   // ── 坐标系变换 ──
   float cos_rot = cosf(-current_theta), sin_rot = sinf(-current_theta);
-  float path_vx_r = path_dir_x * cos_rot - path_dir_y * sin_rot;
-  float path_vy_r = path_dir_x * sin_rot + path_dir_y * cos_rot;
   float path_tangent = atan2f(path_dir_y, path_dir_x);  // 世界系路径切线
 
-  // ── 转弯增强 ──
-  float turn_sharp = fminf(1.0f, fabsf(path_turn_angle) / (CUDART_PI_F / 3.0f));
+  // ── 前瞻点方向 (机器人坐标系), 用于速度奖励和采样偏置 ──
   float dx_t = target_x - current_x, dy_t = target_y - current_y;
   float tx_r = dx_t * cos_rot - dy_t * sin_rot, ty_r = dx_t * sin_rot + dy_t * cos_rot;
-  float side_r = fminf(1.0f, fabsf(atan2f(ty_r, tx_r)) / (CUDART_PI_F / 2.0f));
-  float lat_mult = fminf(turn_lateral_max_boost,
-      1.0f + turn_sharp * turn_lateral_boost + side_r * turn_lateral_boost * 0.4f);
-  float noise_boost = 1.0f + turn_sharp * turn_lateral_boost * 0.4f
-                           + side_r * turn_lateral_boost * 0.15f;
-
-  // ── 前瞻点方向 (机器人坐标系), 用于速度奖励 ──
   float lh_dist = hypotf(tx_r, ty_r);
   float lh_vx_r = tx_r / fmaxf(lh_dist, 1e-6f);
   float lh_vy_r = ty_r / fmaxf(lh_dist, 1e-6f);
 
-  // ── omega 引导 (180° 对称: 框体 θ 与 θ+π 等价, 旋转量 ≤90°) ──
-  float path_angle_err = atan2f(path_vy_r, path_vx_r);
-  if (path_angle_err > CUDART_PI_F / 2.0f)       path_angle_err -= CUDART_PI_F;
-  else if (path_angle_err < -CUDART_PI_F / 2.0f) path_angle_err += CUDART_PI_F;
-
   // ── 初始状态 ──
   float x = current_x, y = current_y, theta = current_theta;
-  float obst_acc = 0.0f, track_acc = 0.0f, prog_acc = 0.0f;
+  float obst_acc = 0.0f, track_acc = 0.0f, prog_acc = 0.0f, dev_acc = 0.0f;
   float cum_dist = 0.0f, max_travel = max_v * dt * horizon;
 
   for (int t = 0; t < horizon; ++t) {
@@ -107,21 +99,19 @@ __global__ void mppi_sample_kernel(
     float ns_vy = fmaxf(noise_scale_floor_vy, ns_t);
     float ns_w  = fmaxf(noise_scale_floor_w,  ns_t);
 
-    // 采样
+    // 采样 — vx/vy 混合: base+noise 与 lookahead 方向插值, 打破纯前向偏置
+    // lateral_guidance_scale: 0=纯base+noise, 1=完全锚定lookahead
     float bvx = base_vx[t], bvy = base_vy[t], bw = base_w[t];
-    float base_spd = hypotf(bvx, bvy);
-    float vx = (1.0f - guidance_weight) * (bvx + noise_vx[idx] * ns_t)
-             + guidance_weight * path_vx_r * base_spd;
-    float vy = (1.0f - guidance_weight) * (bvy + noise_vy[idx] * ns_vy
-                   * cross_track_noise_scale * noise_boost)
-             + guidance_weight * path_vy_r * base_spd * lateral_guidance_scale * lat_mult;
-    float omega = bw + noise_w[idx] * ns_w
-                + path_angle_err * (0.5f / dt) * guidance_weight;
+    // 参考速度取 max_v 的 30% 为下限, 避免 base≈0 时 guidance 退化为 0
+    float ref_spd = fmaxf(hypotf(bvx, bvy), max_v * 0.3f);
+    float g = lateral_guidance_scale;
+    float vx = (1.0f - g) * (bvx + noise_vx[idx] * ns_t) + g * lh_vx_r * ref_spd;
+    float vy = (1.0f - g) * (bvy + noise_vy[idx] * ns_vy) + g * lh_vy_r * ref_spd;
+    float omega = bw + noise_w[idx] * ns_w;
 
     if (static_cast<float>(s) < pure_rotation_ratio * num_samples && t < pure_rotation_steps) {
       vx = 0.0f; vy = 0.0f;
-      omega = bw + noise_w[idx] * ns_w * pure_rotation_w_boost
-            + path_angle_err * (0.5f / dt) * fmaxf(guidance_weight, 0.3f);
+      omega = bw + noise_w[idx] * ns_w * pure_rotation_w_boost;
     }
 
     vx = fminf(max_v, fmaxf(min_v, vx));
@@ -149,9 +139,13 @@ __global__ void mppi_sample_kernel(
     // 2. PathAlignCritic + PathAngleCritic → tracking
     float dist_to_final = sqrtf((final_goal_x - x) * (final_goal_x - x)
                               + (final_goal_y - y) * (final_goal_y - y));
-    track_acc += compute_path_align_cost(x, y, path_x, path_y, num_path_pts, horizon)
+    float min_path_sq = compute_path_align_cost(x, y, path_x, path_y, num_path_pts, horizon);
+    track_acc += min_path_sq
                + compute_path_angle_cost(theta, path_tangent, goal_yaw,
                                          dist_to_final, horizon);
+
+    // 2b. PathDeviationCritic → 独立偏离代价 (软墙, 复用 min_path_sq 不再遍历)
+    dev_acc += compute_path_deviation_cost(min_path_sq, path_corridor, path_deviation_weight);
 
     // 3. PreferForwardCritic → progress (使用前瞻点方向, 非路径切线)
     prog_acc += compute_speed_reward(vx, vy, lh_vx_r, lh_vy_r);
@@ -162,9 +156,13 @@ __global__ void mppi_sample_kernel(
   // GoalCritic: 终端距离
   prog_acc += compute_terminal_dist_cost(x, y, final_goal_x, final_goal_y);
 
-  costs[s] = obstacle_weight * obst_acc
-           + tracking_weight * track_acc
-           + progress_weight * prog_acc;
+  // ── 归一化代价: per-step 均值 × 占比权重 × 全局缩放 ──
+  //   偏离代价 dev_acc 独立于 cost_scale, 作为绝对软墙叠加
+  float inv_h = 1.0f / static_cast<float>(horizon);
+  costs[s] = cost_scale * (obstacle_ratio * obst_acc * inv_h
+                         + tracking_ratio * track_acc * inv_h
+                         + speed_ratio     * prog_acc * inv_h)
+           + dev_acc * inv_h;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -204,9 +202,10 @@ int mppi_gpu_sample_and_cost(
     int costmap_w, int costmap_h,
     float costmap_res, float costmap_origin_x, float costmap_origin_y,
     float dt, float min_v, float max_v, float max_vy, float max_w,
-    float obstacle_weight, float tracking_weight, float progress_weight,
-    float path_dir_x, float path_dir_y, float guidance_weight,
-    float cross_track_noise_scale, float noise_decay_rate,
+    float cost_scale, float obstacle_ratio, float tracking_ratio, float speed_ratio,
+    float path_deviation_weight, float path_corridor,
+    float path_dir_x, float path_dir_y,
+    float noise_decay_rate,
     float exploration_range_scale, float spatial_decay_weight,
     float noise_scale_floor_vx, float noise_scale_floor_vy, float noise_scale_floor_w,
     float pure_rotation_ratio, int pure_rotation_steps, float pure_rotation_w_boost,
@@ -247,9 +246,10 @@ int mppi_gpu_sample_and_cost(
       current_x, current_y, current_theta, target_x, target_y,
       d_costmap, costmap_w, costmap_h, costmap_res, costmap_origin_x, costmap_origin_y,
       dt, min_v, max_v, max_vy, max_w,
-      obstacle_weight, tracking_weight, progress_weight,
-      path_dir_x, path_dir_y, guidance_weight,
-      cross_track_noise_scale, noise_decay_rate,
+      cost_scale, obstacle_ratio, tracking_ratio, speed_ratio,
+      path_deviation_weight, path_corridor,
+      path_dir_x, path_dir_y,
+      noise_decay_rate,
       exploration_range_scale, spatial_decay_weight,
       noise_scale_floor_vx, noise_scale_floor_vy, noise_scale_floor_w,
       pure_rotation_ratio, pure_rotation_steps, pure_rotation_w_boost,

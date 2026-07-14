@@ -10,9 +10,10 @@
  *         + tracking_weight  × tracking_cost
  *         + progress_weight  × progress_cost
  *
- * 各组件内部源自 nav2 对应 critic:
+ * 各组件内部:
  *   obstacle_cost  → ObstaclesCritic  (碰撞检测)
- *   tracking_cost  → PathAlignCritic + PathAngleCritic + GoalAngleCritic
+ *   tracking_cost  → PathAlignCritic + PathAngleCritic
+ *                     PathAngle 直接使用 waypoint SE2 推荐朝向 (劣弧 ≤90°)
  *   progress_cost  → GoalCritic + PreferForwardCritic
  */
 
@@ -23,9 +24,7 @@
 #endif
 
 // nav2 默认阈值
-#define GOAL_ANGLE_THRESHOLD  0.5f   // 距终点此距离内激活 GoalAngle
 #define PATH_ANGLE_THRESHOLD  0.262f // 朝向偏差超此值(15°)触发 PathAngle 惩罚
-#define HEADING_ANNEAL_DIST   0.5f   // 余弦退火距离
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 组件 1: obstacle_cost (ObstaclesCritic)
@@ -73,6 +72,7 @@ __device__ float compute_obstacle_cost(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// PathAlignCritic: 轨迹点到全局路径的最短距离平方
+/// 注意: 不再内部除以 horizon, 统一在代价组合处做 per-step 归一化
 __device__ float compute_path_align_cost(
     float x, float y,
     const float* __restrict__ path_x, const float* __restrict__ path_y,
@@ -84,38 +84,44 @@ __device__ float compute_path_align_cost(
     float d = point_to_segment_dist_sq(x, y, path_x[p], path_y[p], path_x[p+1], path_y[p+1]);
     if (d < min_sq) min_sq = d;
   }
-  return min_sq / static_cast<float>(horizon);
+  (void)horizon;  // 保留参数兼容性, 归一化移至代价组合
+  return min_sq;
 }
 
-/// PathAngleCritic: 朝向与路径切线偏差惩罚 + 余弦退火到 goal_yaw
-/// 180° 对称: 框体机器人 θ 与 θ+π 等价，始终选旋转量 ≤90° 的朝向
+/// PathAngleCritic: 朝向与 SE2 推荐朝向偏差惩罚
+///   直接使用 waypoint SE2 推荐朝向，无退火过渡
+///   注意: 推荐朝向有前后分别, 不做 180° 对称 (由 heading 状态机自行决定旋转方向)
 __device__ float compute_path_angle_cost(
-    float theta, float path_tangent, float goal_yaw,
+    float theta, float rec_yaw, float goal_yaw,
     float dist_to_final, int horizon)
 {
-  // GoalAngleCritic 区域: 距终点 < GOAL_ANGLE_THRESHOLD
-  if (dist_to_final < GOAL_ANGLE_THRESHOLD) {
-    float t = fminf(1.0f, dist_to_final / HEADING_ANNEAL_DIST);
-    float alpha = (1.0f + cosf(CUDART_PI_F * t)) * 0.5f;
-    float diff = sym_angle_diff(goal_yaw, path_tangent);
-    float target = path_tangent + alpha * diff;
-    float err = sym_angle_diff(theta, target);
-    return err * err / static_cast<float>(horizon);
-  }
+  (void)goal_yaw;
+  (void)dist_to_final;
+  (void)horizon;
+  float err = normalize_angle(theta - rec_yaw);
+  return 4.0f * err * err;
+}
 
-  // PathAngleCritic 区域: 180° 对称 — 连续惩罚, 角度越大代价越高
-  float err = sym_angle_diff(theta, path_tangent);
-  return err * err / static_cast<float>(horizon);
+/// PathDeviationCritic: 偏离路径的陡增惩罚 (独立于 PathAlign, 单独的调节旋钮)
+///   corridor 半宽内不罚; 超出后按"超出量²"惩罚, 形成一堵软墙把机器人挡回路径。
+///   min_sq 复用 PathAlign 已算好的最近距离平方, 不再额外遍历路径。
+__device__ float compute_path_deviation_cost(float min_sq, float corridor, float weight)
+{
+  if (weight <= 0.0f) return 0.0f;
+  float dist   = sqrtf(min_sq);
+  float excess = dist - corridor;
+  if (excess <= 0.0f) return 0.0f;
+  return weight * excess * excess;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 组件 3: progress_cost (GoalCritic + PreferForwardCritic)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// PreferForwardCritic: 匹配速度方向与"当前位置→前瞻点"方向
-///   速度方向朝向前瞻点 → 奖励 (速度越快奖励越大)
-///   速度方向背离前瞻点 → 惩罚 (5倍)
-///   中间角度: 奖励对齐分量, 惩罚侧向分量, 防止推头
+/// PreferForwardCritic: 速度方向必须对准前瞻点方向
+///   使用角度误差线性惩罚 (替代弱梯度的 cosine alignment)
+///   0° 偏差 → 全额奖励, ~19° → 中性, >19° → 递增惩罚
+///   >90° 背离 → 重度惩罚
 __device__ float compute_speed_reward(
     float vx, float vy, float target_vx_r, float target_vy_r)
 {
@@ -129,13 +135,15 @@ __device__ float compute_speed_reward(
   while (angle_err > CUDART_PI_F)  angle_err -= 2.0f * CUDART_PI_F;
   while (angle_err < -CUDART_PI_F) angle_err += 2.0f * CUDART_PI_F;
 
-  float alignment = cosf(angle_err);  // 1=完美对齐, 0=垂直, -1=完全背离
+  float abs_err = fabsf(angle_err);
 
-  // 背离前瞻点 (>90°): 5倍重罚, 防止反向
-  if (alignment < 0.0f) return speed * 5.0f;
+  // 背离前瞻点 (>90°): 重度惩罚, 禁止倒退
+  if (abs_err > CUDART_PI_F / 2.0f)
+    return speed * (5.0f + 3.0f * (abs_err - CUDART_PI_F / 2.0f));
 
-  // 奖励对齐分量, 重罚正交分量 (2× 增强横向抑制)
-  return -speed * alignment + 2.0f * speed * fabsf(sinf(angle_err));
+  // 方向偏移线性惩罚: 0° → -speed, ~19° → 0, 更大偏差 → 正惩罚
+  // 梯度 = 3*speed/rad, 远强于 cos 在 0° 处的零梯度
+  return speed * (3.0f * abs_err - 1.0f);
 }
 
 /// GoalCritic: 终端距离代价
