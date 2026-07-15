@@ -1,0 +1,11 @@
+<library path="nav2_custom_plugins_v2_gpu">
+  <class name="nav2_custom_plugins_v2/MPPISteeringController"
+         type="nav2_custom_plugins_v2::MPPISteeringController"
+         base_class_type="nav2_core::Controller">
+    <description>
+      GPU-accelerated MPPI controller with decoupled [vx, vy, steering_angle] control space.
+      Velocity in global initial-heading frame, steering angle independently controls body orientation.
+      Use: plugin: "nav2_custom_plugins_v2/MPPISteeringController"
+    </description>
+  </class>
+</library>
