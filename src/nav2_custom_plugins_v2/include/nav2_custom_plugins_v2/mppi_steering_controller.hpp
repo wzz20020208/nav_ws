@@ -74,6 +74,8 @@ private:
   // ── 输出 ──
   rclcpp::Publisher<nav2_custom_plugins_v2::msg::VelocitySteering>::SharedPtr
     steering_pub_;                       // /cmd_vel_steering 发布器
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr
+    cmd_vel_pub_;                        // /mppi_cmd_vel 独立话题, 与 Nav2 隔离
 };
 
 }  // namespace nav2_custom_plugins_v2

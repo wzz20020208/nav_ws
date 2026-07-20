@@ -88,6 +88,8 @@ void MPPISteeringController::configure(
   vis_pub_.init(node.get());  // LifecycleNode* → LifecycleNode*
   steering_pub_ = node->create_publisher<msg::VelocitySteering>(
       "/cmd_vel_steering", 10);
+  cmd_vel_pub_ = node->create_publisher<geometry_msgs::msg::TwistStamped>(
+      "/cmd_vel_mppi", 10);
 
   RCLCPP_INFO(node->get_logger(),
       "[%s] configured N=%d H=%d dt=%.2f v=[%.2f,%.2f] vy=±%.2f",
@@ -105,6 +107,8 @@ void MPPISteeringController::cleanup()
   noise_gen_.reset();
   gpu_uploader_.reset();
   gpu_engine_.reset();
+  cmd_vel_pub_.reset();
+  steering_pub_.reset();
 }
 
 void MPPISteeringController::activate()   {}
@@ -137,6 +141,7 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
       double yaw = 2.0 * atan2(pose.pose.orientation.z, pose.pose.orientation.w);
       cmd.twist.angular.z = yaw;  // global: angular.z = 目标朝向, 保持当前不转
     }
+    cmd_vel_pub_->publish(cmd);
     return cmd;
   }
 
@@ -273,6 +278,9 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   cmd.twist.linear.y  = proc.vy_out;
   // global 模式: omega_out (已转 odom 系); base_link 模式: omega
   cmd.twist.angular.z = proc.omega_out;
+
+  // 发布到独立话题, 与 Nav2 /cmd_vel 隔离
+  cmd_vel_pub_->publish(cmd);
 
   // 同时发布自定义 VelocitySteering 消息
   if (steering_pub_) {
