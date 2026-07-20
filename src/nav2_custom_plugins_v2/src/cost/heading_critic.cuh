@@ -112,7 +112,7 @@ public:
     (void)x; (void)y;
 
     float err_now = normalize_angle(theta - path.path_tangent);
-    float err_cmd = normalize_angle(delta - path.path_tangent);
+    float err_cmd = normalize_angle(delta - theta);
     return err_now * err_now + err_cmd * err_cmd;
   }
 };

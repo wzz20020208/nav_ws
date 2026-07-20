@@ -29,6 +29,7 @@ set(msg_files
   "msg/FootArray.msg"
   "msg/FootPrintArray.msg"
   "msg/RobotStateSnapshot.msg"
+  "msg/NavigationCommand.msg"
 )
 
 

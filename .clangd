@@ -1,0 +1,72 @@
+CompileFlags:
+  Add:
+    - -std=c++17
+    - -I/home/wzz2002/test/THEMIS/nav_ws/src/nav2_custom_plugins_v2/include
+    - -I/home/wzz2002/test/THEMIS/nav_ws/src/nav2_custom_plugins_v2/src/gpu
+    - -I/home/wzz2002/test/THEMIS/nav_ws/src/nav2_custom_plugins/include
+    - -I/usr/local/cuda-13.0/targets/x86_64-linux/include
+    - -I/opt/ros/humble/include
+    - -I/opt/ros/humble/include/rclcpp
+    - -I/opt/ros/humble/include/rclcpp_lifecycle
+    - -I/opt/ros/humble/include/rcpputils
+    - -I/opt/ros/humble/include/rcutils
+    - -I/opt/ros/humble/include/rmw
+    - -I/opt/ros/humble/include/tf2
+    - -I/opt/ros/humble/include/tf2_ros
+    - -I/opt/ros/humble/include/tf2_geometry_msgs
+    - -I/opt/ros/humble/include/rosidl_runtime_cpp
+    - -I/opt/ros/humble/include/rosidl_runtime_c
+    - -I/opt/ros/humble/include/pluginlib
+    - -I/opt/ros/humble/include/class_loader
+    - -I/opt/ros/humble/include/nav2_core
+    - -I/opt/ros/humble/include/nav2_util
+    - -I/opt/ros/humble/include/nav2_costmap_2d
+    - -I/opt/ros/humble/include/nav2_msgs
+    - -I/opt/ros/humble/include/nav_msgs
+    - -I/opt/ros/humble/include/geometry_msgs
+    - -I/opt/ros/humble/include/visualization_msgs
+    - -I/opt/ros/humble/include/sensor_msgs
+    - -I/opt/ros/humble/include/std_msgs
+    - -I/opt/ros/humble/include/builtin_interfaces
+    - -I/opt/ros/humble/include/unique_identifier_msgs
+    - -I/opt/ros/humble/include/action_msgs
+    - -I/opt/ros/humble/include/rosidl_typesupport_interface
+    - -I/opt/ros/humble/include/rcl
+    - -I/opt/ros/humble/include/rcl_interfaces
+    - -I/opt/ros/humble/include/rcl_yaml_param_parser
+    - -I/opt/ros/humble/include/rcl_logging_interface
+    - -I/opt/ros/humble/include/rcl_lifecycle
+    - -I/opt/ros/humble/include/rmw_dds_common
+    - -I/opt/ros/humble/include/rosgraph_msgs
+    - -I/opt/ros/humble/include/statistics_msgs
+    - -I/opt/ros/humble/include/libstatistics_collector
+    - -I/opt/ros/humble/include/tracetools
+    - -I/opt/ros/humble/include/lifecycle_msgs
+    - -I/opt/ros/humble/include/message_filters
+    - -I/opt/ros/humble/include/tf2_msgs
+    - -I/opt/ros/humble/include/bond
+    - -I/opt/ros/humble/include/bondcpp
+    - -I/opt/ros/humble/include/smclib
+    - -I/opt/ros/humble/include/map_msgs
+    - -I/opt/ros/humble/include/ament_index_cpp
+
+---
+
+If:
+  PathMatch: .*\.cu$
+CompileFlags:
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - "-Xcompiler*"
+    - "--generate-code*"
+  Add:
+    - --cuda-host-only
+    - -D__global__=
+    - -D__device__=
+    - -D__host__=
+    - -I/usr/local/cuda-13.0/targets/x86_64-linux/include
+    - -Dfmaxf=__builtin_fmaxf
+    - -Dfminf=__builtin_fminf
+    - -Dcosf=__builtin_cosf
+    - -Dsinf=__builtin_sinf
+    - -Dexpf=__builtin_expf

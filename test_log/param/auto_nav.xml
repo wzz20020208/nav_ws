@@ -1,0 +1,64 @@
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+
+    <RecoveryNode number_of_retries="5" name="NavRecovery">
+
+      <ReactiveSequence name="MonitorAndFollow">
+
+        <ReactiveFallback name="CheckReplan">
+
+          <Inverter>
+            <ShouldReplan
+              path="{path}"
+              goal="{goal}"
+              deviation_threshold="0.5"
+              lookahead_dist="2.0"
+              lethal_threshold="90"
+              costmap_topic="local_costmap/costmap"/>
+          </Inverter>
+
+          <RecoveryNode number_of_retries="3" name="PlanOrEscape">
+            <RateController hz="5.0">
+              <ComputePathToPose
+                goal="{goal}"
+                path="{path}"
+                planner_id="GridBased"/>
+            </RateController>
+            <Sequence name="EmergencyEscape">
+              <ClearEntireCostmap
+                service_name="local_costmap/clear_entirely_local_costmap"/>
+              <ClearEntireCostmap
+                service_name="global_costmap/clear_entirely_global_costmap"/>
+              <ForcedBackUp
+                backup_dist="0.2"
+                backup_speed="0.1"
+                time_limit="2.0"/>
+            </Sequence>
+          </RecoveryNode>
+
+        </ReactiveFallback>
+
+        <FollowPath
+          path="{path}"
+          controller_id="FollowPath"/>
+
+      </ReactiveSequence>
+
+      <Sequence name="RecoveryActions">
+        <ReactiveFallback name="TryBackUp">
+          <ForcedBackUp
+            backup_dist="0.2"
+            backup_speed="0.1"
+            time_limit="2.0"/>
+          <AlwaysSuccess/>
+        </ReactiveFallback>
+        <ClearEntireCostmap
+          service_name="local_costmap/clear_entirely_local_costmap"/>
+        <ClearEntireCostmap
+          service_name="global_costmap/clear_entirely_global_costmap"/>
+      </Sequence>
+
+    </RecoveryNode>
+
+  </BehaviorTree>
+</root>

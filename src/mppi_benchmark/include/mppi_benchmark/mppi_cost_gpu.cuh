@@ -2,10 +2,10 @@
  * @file mppi_cost_gpu.cuh
  * @brief GPU 版 MPPI 代价计算 — 提取自 nav2_custom_plugins
  *
- * 三组件架构:
- *   total = obstacle_weight  × obstacle_cost
- *         + tracking_weight  × (path_align + path_angle)
- *         + progress_weight  × (speed_reward + terminal_dist)
+ * 三组件归一化架构:
+ *   total = cost_scale × (obs_ratio × obst_acc/horizon
+ *                        + trk_ratio × track_acc/horizon
+ *                        + spd_ratio × prog_acc/horizon)
  *
  * 本文件包含 __device__ 函数和 __global__ kernel 定义,
  * 供 mppi_cost_gpu.cu 编译。
@@ -121,6 +121,7 @@ __device__ float compute_obstacle_cost_gpu(
 // 组件 2: 跟踪代价
 // ════════════════════════════════════════════
 
+/// 注意: 不再内部除以 horizon, 统一在代价组合处做 per-step 归一化
 __device__ float compute_path_align_cost_gpu(
     float x, float y,
     const float* __restrict__ path_x, const float* __restrict__ path_y,
@@ -133,13 +134,16 @@ __device__ float compute_path_align_cost_gpu(
                                            path_x[p+1], path_y[p+1]);
     if (d < min_sq) min_sq = d;
   }
-  return min_sq / static_cast<float>(horizon);
+  (void)horizon;  // 保留参数兼容性, 归一化移至代价组合
+  return min_sq;
 }
 
+/// 注意: 不再内部除以 horizon, 统一在代价组合处做 per-step 归一化
 __device__ float compute_path_angle_cost_gpu(
     float theta, float path_tangent, float goal_yaw,
     float dist_to_final, int horizon)
 {
+  (void)horizon;  // 保留参数兼容性, 归一化移至代价组合
   // GoalAngleCritic 区域: 余弦退火 + 180° 对称
   if (dist_to_final < GOAL_ANGLE_THRESHOLD) {
     float t = fminf(1.0f, dist_to_final / HEADING_ANNEAL_DIST);
@@ -147,11 +151,11 @@ __device__ float compute_path_angle_cost_gpu(
     float diff = gpu_sym_angle_diff(goal_yaw, path_tangent);
     float target = path_tangent + alpha * diff;
     float err = gpu_sym_angle_diff(theta, target);
-    return err * err / static_cast<float>(horizon);
+    return 4.0f * err * err;
   }
   // PathAngleCritic 区域: 180° 对称 — 连续惩罚, 角度越大代价越高
   float err = gpu_sym_angle_diff(theta, path_tangent);
-  return err * err / static_cast<float>(horizon);
+  return 4.0f * err * err;
 }
 
 // ════════════════════════════════════════════
@@ -194,7 +198,7 @@ __global__ void mppi_cost_benchmark_kernel(
     int costmap_w, int costmap_h,
     float costmap_res, float costmap_origin_x, float costmap_origin_y,
     float dt, int horizon,
-    float obstacle_weight, float tracking_weight, float progress_weight,
+    float cost_scale, float obstacle_ratio, float tracking_ratio, float speed_ratio,
     float path_vx_r, float path_vy_r,
     float path_tangent, float goal_yaw,
     float fp_front, float fp_back, float fp_left, float fp_right,
@@ -236,9 +240,11 @@ __global__ void mppi_cost_benchmark_kernel(
 
   prog_acc += compute_terminal_dist_cost_gpu(x, y, final_goal_x, final_goal_y);
 
-  costs[s] = obstacle_weight * obst_acc
-           + tracking_weight * track_acc
-           + progress_weight * prog_acc;
+  // ── 归一化代价: per-step 均值 × 占比权重 × 全局缩放 ──
+  float inv_h = 1.0f / static_cast<float>(horizon);
+  costs[s] = cost_scale * (obstacle_ratio * obst_acc * inv_h
+                         + tracking_ratio * track_acc * inv_h
+                         + speed_ratio     * prog_acc * inv_h);
 }
 
 #endif  // MPPI_COST_GPU_CUH_

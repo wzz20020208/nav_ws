@@ -6,10 +6,9 @@
 nav_ws/
 ├── src/
 │   ├── nav2_custom_plugins/        # 旧 MPPI 插件 ([vx,vy,omega], 仅供参考)
-│   ├── nav2_custom_plugins_v2/     # 新 MPPI 插件 ([vx,vy,delta], 开发中)
+│   ├── nav2_custom_plugins_v2/     # 新 MPPI 插件 ([vx,vy,delta], 核心模块已完成)
 │   ├── nav_launch/                 # 启动配置 & YAML 参数
 │   ├── velocity_controller/        # 底层速度控制器 (Python)
-│   ├── navigation/                 # 导航配置
 │   └── ...
 ```
 
@@ -21,21 +20,245 @@ nav_ws/
 - **vx, vy**: 全局初始朝向系线速度, 不随机器人朝向旋转
 - **delta**: 目标身体朝向角, 以 max_w 限速跟踪, 不影响线速度方向
 
-### 模块 (9 个, 组合优于继承)
+### 文件结构
 
 ```
-MPPISteeringController (Nav2 接口 + 流程编排)
-├── mppi_core              参数 + 类型 + 运动学
-├── path_manager            路径解析、前瞻点、最近点
-├── cost_evaluator          代价后处理
-├── velocity_postprocessor  EMA→减速→钳位→δ→ω
-├── gpu_engine              GPU 封装 (噪声/缓冲区/内核)
-├── state_machine           状态机 (heading/narrow)
-├── visualization           RViz 可视化
-└── mppi_logger             日志+统计
+nav2_custom_plugins_v2/
+├── include/nav2_custom_plugins_v2/
+│   ├── core/mppi_core.hpp               # 参数/类型/运动学
+│   ├── gpu/gpu_engine.hpp               # GPU 缓冲区 + kernel 启动
+│   ├── gpu/gpu_uploader.hpp             # GPU 缓冲区注册 + 上传
+│   ├── pipeline/mppi_pipeline.hpp       # CPU→GPU 桥接层
+│   ├── mppi_steering_controller.hpp     # Nav2 插件入口
+│   └── modules/
+│       ├── cost_evaluator.hpp           # 代价后处理 (CPU 端)
+│       ├── path_manager.hpp
+│       ├── velocity_postprocessor.hpp
+│       ├── state_machine.hpp
+│       ├── visualization.hpp
+│       └── mppi_logger.hpp
+│
+├── src/
+│   ├── cost/                            # 代价函数 — 领域逻辑, GPU/CPU 共用
+│   │   ├── critic_common.cuh            # CriticCategory 枚举 + CriticBase 基类
+│   │   ├── obstacle_critic.cuh          # OBSTACLE: FootprintCritic + ObstacleCategory
+│   │   ├── heading_critic.cuh           # HEADING:  PathAlign + PathAngle + PathDeviation
+│   │   ├── speed_critic.cuh             # SPEED:    SpeedRewardCritic + SpeedCategory
+│   │   └── critic_manager.cuh           # 3 大分类容器 + 大类间加权求和
+│   │
+│   ├── gpu/                             # GPU 基础设施
+│   │   ├── mppi_gpu_common.cuh          # costmap_bilinear, normalize_angle 等工具
+│   │   ├── mppi_gpu_kernels.cu          # cost_eval_kernel, weighted_sum_kernel
+│   │   ├── mppi_gpu_critics.cuh         # [兼容转发] → cost/critic_manager.cuh
+│   │   ├── gpu_engine.cpp
+│   │   └── gpu_uploader.cpp
+│   │
+│   ├── core/mppi_core.cpp
+│   ├── pipeline/mppi_pipeline.cpp
+│   ├── modules/path_manager.cpp         # 路径查询 (最近点/前瞻/yaw)
+│   ├── modules/velocity_postprocessor.cpp  # 控制量后处理 (提取+clamp+δ→ω)
+│   ├── modules/state_machine.cpp          # heading 原地旋转判定 (迟滞退出)
+│   ├── modules/visualization.cpp          # RViz Marker 发布 (轨迹/前瞻/指令)
+│   ├── mppi_steering_controller.cpp
+│
+├── test/test_critics.cu                 # 代价函数调用链测试
+└── msg/VelocitySteering.msg
 ```
 
-### 运动学
+### 模块状态
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| mppi_core | ✅ | 参数/MppiParams, 类型 (BatchTrajectories, ControlSequence), 运动学, PathInfo/GoalInfo |
+| gpu_engine | ✅ | GPU 缓冲区管理, kernel 启动 (launchCostKernel, launchWeightedSumKernel) |
+| gpu_uploader | ✅ | 缓冲区名→指针映射, 异步上传 (cudaMemcpyAsync), uploadPath |
+| pipeline | ✅ | CPU→GPU 桥接: uploadBase, uploadRollout, launchCost, launchWeightedSum |
+| cost 系统 | ✅ | 代价函数架构 — 3 大类, 函数指针注册表, 两层归一化 |
+| path_manager | ✅ | 最近点查询 (增量), 前瞻点计算, yaw 来源切换 (planner/自算), GPU 数据构建 |
+| steering_controller | ✅ | configure/computeVelocityCommands, 含 steering publisher, use_planner_yaw 参数 |
+| cost_evaluator | ⏸️ 搁置 | 当前功能只有 min_element+除法 (~10行), 不足以成模块, 等自适应 lambda/代价直方图 |
+| velocity_postprocessor | ✅ | 提取+clamp+δ→ω, 解耦自 steering_controller 末尾 |
+| state_machine | ✅ | heading 原地旋转判定 (迟滞退出: 进入=threshold, 退出=threshold×0.5) |
+| visualization | ✅ | RViz MarkerArray: 机器人朝向/前瞻点/最优轨迹/采样散布/速度箭头 |
+| mppi_logger | TODO | |
+
+---
+
+## 代价系统架构 (cost/)
+
+### 设计原则
+
+- GPU 上不能用虚函数 (全局内存两次访存 + 无法内联)
+- 采用**函数指针注册表**实现运行时多态 — 兼顾灵活性和性能
+- 三层调用链: `CriticManager` → `XxxCategory` → `XxxCritic::compute()`
+
+### 类层级
+
+```
+CriticBase                              (critic_common.cuh — 顶级标签基类)
+├── ObstacleCritic : CriticBase         (obstacle_critic.cuh — OBSTACLE 分类基类)
+│   └── FootprintCritic : ObstacleCritic ← 已实现: 足迹采样碰撞检测
+│       (DistanceFieldCritic)           ← 未来
+│
+├── HeadingCritic : CriticBase          (heading_critic.cuh)
+│   ├── PathAlignCritic                ← 点到路径最近距离
+│   ├── PathAngleCritic                ← 朝向对齐推荐朝向 (normalize_angle, 无退火)
+│   └── PathDeviationCritic            ← 走廊偏离软墙
+│
+└── SpeedCritic : CriticBase            (speed_critic.cuh)
+    ├── SpeedRewardCritic              ← 速度方向对齐前瞻点
+    └── TerminalDistCritic             ← 终点距离 (kernel 内直接计算, 非注册表)
+```
+
+### 容器/管理器层级 (不在 CriticBase 继承链中)
+
+```
+CriticManager                           (critic_manager.cuh)
+├── ObstacleCategory                    (obstacle_critic.cuh)
+│     subs_[0] = { footprintFn, true, 1.0f }   ← FootprintCritic
+│     evaluate() → 遍历注册表 → 函数指针直调 → 加权平均
+│
+├── HeadingCategory                     (heading_critic.cuh)
+│     subs_[0..2] = { pathAlignFn, pathAngleFn, pathDeviationFn }
+│
+└── SpeedCategory                       (speed_critic.cuh)
+      subs_[0] = { speedRewardFn, true, 1.0f }   ← SpeedRewardCritic
+```
+
+### 调用链 (kernel 每步)
+
+```
+cost_eval_kernel (mppi_gpu_kernels.cu)
+  CriticManager mgr; mgr.init();
+  for each timestep:
+    mgr.evaluate(x, y, θ, vx, vy, cmap, fp, path, goal)
+      │
+      ├── cat_w[0] × obstacle_.evaluate(x, y, cos, sin, vx, vy, cmap, fp)
+      │     → FootprintCritic: 足迹网格采样 → costmap 双线性插值 → n⁴ 碰撞惩罚
+      │
+      ├── cat_w[1] × heading_.evaluate(x, y, θ, path)
+      │     → PathAlignCritic:     1-exp(-dist²)        [0,1)
+      │     → PathAngleCritic:     1-exp(-err²)         [0,1)
+      │     → PathDeviationCritic: 1-exp(-excess²)      [0,1), corridor=0.5m
+      │
+      └── cat_w[2] × speed_.evaluate(vx, vy, goal)
+            → SpeedRewardCritic: sigmoid(speed×(3·|err|-1))  [0,1)
+
+  (循环后) total += cat_w[SPEED] × sqrt((gx-x)² + (gy-y)²)  ← TerminalDistCritic
+```
+
+### 归一化 (三层)
+
+1. **大类内平均** — 各 Category::evaluate(): `Σ(w × fn) / active_count`
+2. **大类间加权** — CriticManager::evaluate(): `Σ cat_weights[c] × category.evaluate()`
+3. **horizon 归一化** — kernel: `d_costs[s] = total / H` (保证不同 horizon 代价可比)
+
+默认: cat_weights = {OBSTACLE:0.4, HEADING:0.3, SPEED:0.3}
+
+所有子类返回值已指数归一化到 [0,1):
+  PathAlign:        1-exp(-dist²)       (0m→0, 1m→0.63)
+  PathAngle:        1-exp(-err²)        (0°→0, 45°→0.46)
+  PathDeviation:    1-exp(-excess²)     (corridor=0.5m, 超出0.5m→0.22)
+  SpeedReward:      sigmoid(raw)        (对齐→0.4, 中性→0.5, 背离→0.9)
+  FootprintCritic:  n⁴ 平均            (原已 [0,1])
+
+### 与虚函数多态的对比
+
+| | 本系统 | C++ 虚函数 |
+|---|---|---|
+| 分发方式 | 注册表条目 → 函数指针 | 对象 vptr → 虚表 |
+| 元数据 (weight/enabled) | 和 fn 指针打包在同一 SubEntry | 需额外结构 |
+| GPU 开销 | 1 次栈上指针解引用 | 2 次 global memory 访存 |
+| 内联 | 不可 (函数指针) | 不可 (虚调用) |
+| 运行时灵活性 | ✅ setWeight/setEnabled | ✅ 替换对象 |
+| 子类 stateless | ✅ 临时构造, 零开销 | 需要持久对象 |
+
+### 新增代价子类步骤
+
+给 OBSTACLE 加 DistanceFieldCritic:
+1. 写子类: `class DistanceFieldCritic : public ObstacleCritic { compute() }`
+2. 写 wrapper: `static float distanceFn(...) { D c; return c.compute(...); }`
+3. 注册: `init()` 加 `subs_[1] = { distanceFn, true, 0.4f }`
+→ CriticManager 不动
+
+### FootprintCritic 算法概要
+
+- 足迹离散化 nx×ny (钳位 [2,10]) → 旋转矩阵变换到世界系
+- costmap 双线性插值 → val ≥ 1.0 做 n⁴ 惩罚 (n=val/255)
+- 倒车时 (lx<0, vx<0) 垫高 rear_obstacle_cost
+- 取全足迹平均, 代价 ∈ [0,1]
+
+### 推荐朝向来源 (use_planner_yaw)
+
+| 开关 | 来源 | 说明 |
+|------|------|------|
+| `true` | `pose.orientation` | Planner 给的 SE2 朝向 (navfn 含平滑+时间一致性优化) |
+| `false` | `atan2(dy, dx)` | 自算相邻路径点切线方向 |
+
+前瞻点 = 最近路径点沿路径前推 `min_lookahead_dist`。推荐朝向取前瞻点处的 yaw。
+
+### GPU 数据结构
+
+| 结构 | 使用者 | 内容 |
+|------|--------|------|
+| CostmapInfo | OBSTACLE | costmap 数据指针 + 尺寸 + 分辨率 + 原点 |
+| Footprint | OBSTACLE | 前后左右尺寸 + 采样间距 + 倒车垫高值 |
+| PathInfo | HEADING | 路径点 GPU 指针 + 点数 + 前瞻点切线 + 终点朝向 |
+| GoalInfo | SPEED | 期望速度方向 + 终点坐标 |
+
+### HEADING 状态机 (state_machine)
+
+```
+evaluateHeading(current_yaw, lookahead_yaw, dist_lh_to_goal, params)
+  │
+  ├── enable_heading_speed_limit=false → 直接放行 (NORMAL)
+  │
+  ├── 已在旋转中 (rotating_=true):  迟滞退出
+  │     abs(err) ≤ threshold × 0.5 → 退出旋转
+  │     else → 继续旋转
+  │
+  └── 首次判定:
+        abs(err) > threshold
+        AND dist(lh,goal) ≥ 0.5m → HEADING_MISALIGN
+        else → NORMAL
+
+HEADING_MISALIGN 时:
+  - base_link 模式: angular.z = sign(err) × max_w
+  - global 模式:   angular.z = delta (目标角度)
+  - 跳过整个 MPPI 管线 (noise gen / rollout / GPU)
+```
+
+### 输出模式 (use_global_mode)
+
+| | base_link (false) | global (true) |
+|---|---|---|
+| frame_id | `BASE_LINK` | `odom` |
+| linear.x/y | vx/vy 原样 | vx/vy 原样 (运动模型 x+=vx·dt, 已是全局量) |
+| angular.z | ω = clamp(normalize(δ-θ), ±max_w·dt)/dt | delta (目标角度直出) |
+
+### 全部可配参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| num_samples | int | 8000 | 轨迹采样数 |
+| prediction_horizon | int | 5 | 预测步数 |
+| dt | double | 0.05 | 积分步长 (s) |
+| max_v / min_v | double | 0.4 / -0.4 | vx 限幅 |
+| max_vy | double | 0.2 | vy 限幅 |
+| max_steering_angle | double | 0.785 | delta 限幅 (rad) |
+| max_w | double | 0.6 | 最大角速度 (rad/s) |
+| action_std_v / vy / delta | double | 0.5 / 0.5 / 0.3 | 噪声标准差 |
+| lambda | double | 4.0 | MPPI 温度 |
+| footprint_* | double | 0.17~0.28 | 足迹尺寸 (m) |
+| min_lookahead_dist | double | 0.3 | 前瞻距离 (m) |
+| use_planner_yaw | bool | true | true=planner 朝向, false=自算切线 |
+| use_global_mode | bool | false | true=odom 系输出, false=base_link 系 |
+| enable_heading_speed_limit | bool | true | 启用 heading 状态机 |
+| heading_misalign_threshold | double | 1.047 | 朝向偏差阈值 (rad, ≈60°) |
+
+---
+
+## 运动学
 
 ```
 位置 (全局系, 无需旋转):
@@ -50,164 +273,43 @@ MPPISteeringController (Nav2 接口 + 流程编排)
   omega = clamp(normalize(delta - theta) / dt, ±max_w)
 ```
 
-### 消息
+## 消息
 
 - 输出: `VelocitySteering.msg` (vx, vy, steering_angle) → `/cmd_vel_steering`
 - 兼容: `TwistStamped` 返回给 Nav2 controller_server
+- 生成的 msg 命名空间: `nav2_custom_plugins_v2::msg` (与主代码共享外层 namespace)
 
 ---
 
-## 旧包 GPU 加载流程分析 (参考)
-
-旧包 `nav2_custom_plugins` 的 `MPPIGPUController` 是重构参考。以下是其 GPU 加载流程的详细分析。
-
-### 概念: CPU 和 GPU 各有一片内存
+## 每帧数据流 (computeVelocityCommands)
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   CPU 主机内存 │ ←──→│   PCIe 总线   │ ←──→│   GPU 显存    │
-│  host_noise  │ ────── cudaMemcpy ────→ │ d_noise_     │
-│  host_costs  │ ←──── cudaMemcpy ──── │ d_costs_     │
-└──────────────┘     └──────────────┘     └──────────────┘
+setPlan(path) → path_mgr_.setPath, state_machine_.reset
+
+① start = {x, y, yaw} from pose
+② path_mgr_: closest → lookahead → yaw (planner/自算) → PathInfo/GoalInfo
+②b state_machine_.evaluateHeading → rotate_in_place?
+      ├── YES → 直接输出旋转指令, return (跳过 MPPI)
+      └── NO  ↓
+③ noise_gen_.generate(N, H, lookahead_yaw)
+④ batch_rollout(start, base_seq, noise, params) → BatchTrajectories
+⑤ uploadBase + uploadRollout → GPU
+⑥ uploadPath → GPU, fill PathInfo device pointers
+⑦ CostmapInfo + Footprint
+⑧ launchCostKernel(cmap, fp, path, goal) → d_costs[N] (/H 归一化)
+⑨ min_cost = min(costs)
+⑩ launchWeightedSumKernel → result[H×4]
+⑪ vel_postprocessor_.process(result, yaw, global_mode)
+      → extractStep0 → clamp → (δ→ω or passthrough)
+⑫ base_seq_.shiftAndDecay + fill proc.control
+⑬ TwistStamped: frame_id, linear.x/y, angular.z
 ```
-
-### 阶段 0: 启动 (configure, 调一次)
-
-```
-configure()
-  ├─ 读 YAML → 成员变量 (num_samples=8000, max_v=0.4, ...)
-  └─ allocateGPUBuffers() → cudaMalloc 在显存圈 15 块地
-```
-
-分配的 GPU 缓冲区:
-
-| 名称 | 大小 | 用途 |
-|------|------|------|
-| d_noise_vx/vy/w_ | 8000×5×4B = 160KB ×3 | 噪声 (CPU预生成, 每帧上传) |
-| d_base_vx/vy/w_ | 5×4B = 20B ×3 | warm-start 基序列 |
-| d_sampled_vx/vy/w_ | 8000×5×4B = 160KB ×3 | 内核输出: 实际采用的控制量 |
-| d_costs_ | 8000×4B = 32KB | 每条轨迹总代价 |
-| d_result_seq_ | 5×4×4B = 80B | 加权平均最优序列 |
-| d_traj_x/y_ | 8000×5×4B = 160KB ×2 | 轨迹世界坐标 |
-| d_path_x/y_ | 30×4B = 120B ×2 | 全局路径点 |
-
-d_costmap_ 不在这里分配, 每帧按需 cudaMalloc/cudaFree。
-
-### 阶段 1: 每帧 CPU 准备 (computeVelocityCommands, 10Hz 调用)
-
-**1.1 warm-start 基序列**
-
-```
-首帧: 用机器人到目标的朝向差初始化
-  optimal_vx_seq_  = [cos(angle)*speed ×5]
-  optimal_vy_seq_  = [sin(angle)*speed ×5]
-  optimal_omega_seq_ = [angle/dt ×5]
-
-后续帧: 左移一位, 尾部×0.5
-  [t0, t1, t2, t3, t4] → [t1, t2, t3, t4, t4×0.5]
-```
-
-**1.2 噪声生成 (CPU, NLN 混合)**
-
-```cpp
-for (40000 次 = 8000轨迹 × 5步):
-  35% → 对数正态 (重尾大跳, 探索)
-  65% → 正态分布 (小幅稳定)
-
-noise_vx[i] = 采样值;  noise_vy[i] = 采样值;  noise_w[i] = 采样值;
-```
-
-输出三个 `vector<float>`, 各 40000 个元素 (480KB), 存在主机内存。
-
-**1.3 路径提取 + costmap 准备**
-
-路径重采样 → host_path_x/y (最多30点)。costmap 合并 local+global。
-
-### 阶段 2: GPU 上传+计算 (host wrapper 内)
-
-**2.1 上传 (cudaMemcpyAsync, 全部异步)**
-
-```
-noise_vx → d_noise_vx_     40000×4B = 160KB
-noise_vy → d_noise_vy_     160KB
-noise_w  → d_noise_w_      160KB
-base_vx  → d_base_vx_      20B
-base_vy  → d_base_vy_      20B
-base_w   → d_base_w_       20B
-costmap  → d_costmap_      按地图尺寸
-path_x/y → d_path_x/y      120B
-```
-
-**2.2 内核: mppi_sample_kernel**
-
-```
-<<<(8000+255)/256=33 blocks, 256 threads>>>
-= 8000 个 CUDA 线程完全并行
-
-每线程 (一条轨迹):
-  for t = 0..4:
-    1. 采样: vx=clamp(bvx[t]+noise_vx[t]*scale, min_v, max_v)
-    2. RK2积分: x+=dx*dt; y+=dy*dt; theta+=omega*dt
-    3. 代价: obstacle(碰撞检测) + tracking(路径偏离) + speed(速度方向)
-  写回 d_costs_[线程号], d_sampled_* [线程号×5..]
-```
-
-**2.3 内核是异步的** — host wrapper return 时 GPU 可能还在跑。stream 保证顺序 (上传→内核→下载)。
-
-### 阶段 3: 下载结果 (两次同步等待)
-
-```
-① cudaMemcpyAsync(d_costs_ → host_costs, 32KB)
-   cudaStreamSynchronize(stream)        ← 阻塞! 等 GPU
-
-② CPU 扫 8000 个代价, 找 min_cost
-
-③ mppi_weighted_sum_kernel<<<...>>>     ← 又一次内核
-   对 5 个时间步, 各用 exp(-(cost-min)/lambda) 加权平均 8000 条轨迹的控制量
-
-④ cudaMemcpyAsync(d_result_seq_ → host_result_seq, 80B)
-   cudaStreamSynchronize(stream)        ← 又阻塞!
-
-⑤ cudaStreamDestroy(stream)
-```
-
-### 阶段 4: CPU 后处理
-
-```
-提取 step0: best_vx/vy/omega = host_result_seq[0..2]
-钳位 → EMA平滑 → 前瞻减速 → 死区保护
-→ 写入 TwistStamped (返回给 Nav2)
-→ 存 optimal_*_seq_ 供下帧 warm-start
-```
-
-### 阶段 5: 关闭 (cleanup, 调一次)
-
-```
-freeGPUBuffers() → 15 个 cudaFree
-```
-
-### 一帧时间线
-
-```
-CPU: [噪声] [基序列] [costmap] ─上传─ 空闲...... ─下载─ [等] [找min] [加权] [等] [后处理] [发布]
-GPU:                        空闲. ─上传─ [8000线程5步rollout] ─下载─ [8000线程加权] ─下载─ 空闲.
-                              ←── CPU/GPU 交替忙, 无法真正并行 ──→
-```
-
-### 问题
-
-1. **host wrapper 参数 40+ 个**: 加一个参数要改声明+调用+内核签名, 三个地方
-2. **CPU 生成噪声 → PCIe 上传**: 480KB 噪声每帧走 PCIe, GPU 可以自己生成
-3. **两次 Synchronize**: CPU 干等 GPU 两次
-4. **costmap 手动管理**: 合并 local+global 做了 ~100 行, 尺寸变化时手动 free+malloc
-5. **CUDA API 散落**: cudaMalloc/Memcpy/Stream 直接写在 controller.cpp 业务逻辑里
-6. **无封装**: 没有 GPU 资源管理类, 所有细节暴露在 controller 中
-
----
 
 ## 开发原则
 
 - 旧包 `nav2_custom_plugins` 仅作算法参考, 不拷贝代码
-- 全部分模块从头编写
+- 全部模块从头编写
 - GPU 部分完全重构, 不沿用旧架构
+- GPU 上禁用虚函数, 用函数指针注册表实现多态
+- 每个功能模块独立文件 (`src/modules/`), controller 只做编排
 - 每次修改后 git commit

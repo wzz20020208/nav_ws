@@ -28,7 +28,7 @@ float run_gpu_benchmark(
     float target_x, float target_y,
     const unsigned char* h_costmap, int cm_w, int cm_h,
     float cm_res, float cm_ox, float cm_oy,
-    float dt, float obs_w, float track_w, float prog_w,
+    float dt, float cost_scale, float obs_r, float track_r, float spd_r,
     float path_vx_r, float path_vy_r, float path_tangent, float goal_yaw,
     float fp_f, float fp_b, float fp_l, float fp_r,
     float fp_sp, float rear_cost,
@@ -54,7 +54,7 @@ struct BenchData {
   int cm_w, cm_h;
   float cm_res, cm_ox, cm_oy;
   float dt;
-  float obs_w, track_w, prog_w;
+  float cost_scale, obs_r, track_r, spd_r;
   float path_vx_r, path_vy_r, path_tangent, goal_yaw;
   float fp_f, fp_b, fp_l, fp_r, fp_sp, rear_cost;
   std::vector<float> path_x, path_y;
@@ -104,7 +104,7 @@ BenchData generate_random_data(int N, int H)
 
   // 参数
   d.dt = 0.1f;
-  d.obs_w = 10.0f; d.track_w = 30.0f; d.prog_w = 1.5f;
+  d.cost_scale = 10.0f; d.obs_r = 0.4f; d.track_r = 0.3f; d.spd_r = 0.3f;
 
   // 前瞻点方向 (机器人系)
   float lh_angle = std::atan2(d.target_y - d.start_y, d.target_x - d.start_x);
@@ -168,7 +168,7 @@ int main(int argc, char** argv)
         data.target_x, data.target_y,
         data.costmap.data(), data.cm_w, data.cm_h,
         data.cm_res, data.cm_ox, data.cm_oy,
-        data.dt, data.obs_w, data.track_w, data.prog_w,
+        data.dt, data.cost_scale, data.obs_r, data.track_r, data.spd_r,
         data.path_vx_r, data.path_vy_r, data.path_tangent, data.goal_yaw,
         data.fp_f, data.fp_b, data.fp_l, data.fp_r,
         data.fp_sp, data.rear_cost,
@@ -190,7 +190,7 @@ int main(int argc, char** argv)
         data.target_x, data.target_y,
         data.costmap.data(), data.cm_w, data.cm_h,
         data.cm_res, data.cm_ox, data.cm_oy,
-        data.dt, data.obs_w, data.track_w, data.prog_w,
+        data.dt, data.cost_scale, data.obs_r, data.track_r, data.spd_r,
         data.path_vx_r, data.path_vy_r, data.path_tangent, data.goal_yaw,
         data.fp_f, data.fp_b, data.fp_l, data.fp_r,
         data.fp_sp, data.rear_cost,
@@ -220,7 +220,7 @@ int main(int argc, char** argv)
         data.target_x, data.target_y,
         data.costmap.data(), data.cm_w, data.cm_h,
         data.cm_res, data.cm_ox, data.cm_oy,
-        data.dt, data.obs_w, data.track_w, data.prog_w,
+        data.dt, data.cost_scale, data.obs_r, data.track_r, data.spd_r,
         data.path_vx_r, data.path_vy_r, data.path_tangent, data.goal_yaw,
         data.fp_f, data.fp_b, data.fp_l, data.fp_r,
         data.fp_sp, data.rear_cost,

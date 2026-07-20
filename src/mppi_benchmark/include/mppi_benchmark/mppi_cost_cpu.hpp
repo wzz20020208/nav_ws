@@ -62,7 +62,8 @@ inline float compute_path_align_cost_cpu(
                                        path_x[p+1], path_y[p+1]);
     if (d < min_sq) min_sq = d;
   }
-  return min_sq / static_cast<float>(horizon);
+  (void)horizon;  // 保留参数兼容性, 归一化移至代价组合
+  return min_sq;
 }
 
 /// 同 GPU 版 compute_path_angle_cost_gpu
@@ -70,17 +71,18 @@ inline float compute_path_angle_cost_cpu(
     float theta, float path_tangent, float goal_yaw,
     float dist_to_final, int horizon)
 {
+  (void)horizon;  // 保留参数兼容性, 归一化移至代价组合
   if (dist_to_final < GOAL_ANGLE_THRESHOLD) {
     float t = std::min(1.0f, dist_to_final / HEADING_ANNEAL_DIST);
     float alpha = (1.0f + std::cos(M_PI_F * t)) * 0.5f;
     float diff = normalize_angle(goal_yaw - path_tangent);
     float target = path_tangent + alpha * diff;
     float err = normalize_angle(theta - target);
-    return err * err / static_cast<float>(horizon);
+    return err * err;
   }
   float err = normalize_angle(theta - path_tangent);
   if (std::abs(err) > PATH_ANGLE_THRESHOLD)
-    return err * err / static_cast<float>(horizon);
+    return err * err;
   return 0.0f;
 }
 
@@ -124,7 +126,7 @@ inline CPUBenchResult run_cpu_benchmark(
     const unsigned char* costmap, int cm_w, int cm_h,
     float cm_res, float cm_ox, float cm_oy,
     float dt,
-    float obs_w, float track_w, float prog_w,
+    float cost_scale, float obs_r, float track_r, float spd_r,
     float path_vx_r, float path_vy_r,
     float path_tangent, float goal_yaw,
     float fp_f, float fp_b, float fp_l, float fp_r,
@@ -165,7 +167,11 @@ inline CPUBenchResult run_cpu_benchmark(
 
     prog_acc += compute_terminal_dist_cost_cpu(x, y, fgx, fgy);
 
-    costs[s] = obs_w * obst_acc + track_w * track_acc + prog_w * prog_acc;
+    // ── 归一化代价: per-step 均值 × 占比权重 × 全局缩放 ──
+    float inv_h = 1.0f / static_cast<float>(horizon);
+    costs[s] = cost_scale * (obs_r * obst_acc * inv_h
+                           + track_r * track_acc * inv_h
+                           + spd_r   * prog_acc * inv_h);
   }
 
   auto t1 = std::chrono::high_resolution_clock::now();

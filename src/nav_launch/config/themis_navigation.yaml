@@ -202,7 +202,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0    # 平缓衰减 → 通道内形成平滑梯度引导走中间
-        inflation_radius: 0.5       # 大膨胀半径 → 势场覆盖整个通道宽度
+        inflation_radius: 0.05      # 5cm 膨胀, MPPI 足迹碰撞处理实际矩形
 
 global_costmap:
   global_costmap:
@@ -237,7 +237,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0
-        inflation_radius: 0.25      # 内接圆0.20m+余量, MPPI处理实际矩形碰撞
+        inflation_radius: 0.05      # 5cm 膨胀, MPPI 足迹碰撞处理实际矩形
 
 
 planner_server:

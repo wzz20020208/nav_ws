@@ -5,24 +5,27 @@ from launch.actions import ExecuteProcess, TimerAction, RegisterEventHandler
 from launch.event_handlers import OnProcessStart
 
 def generate_launch_description():
-    home_dir = os.path.expanduser('~/THEMIS/THEMIS')
+    home_dir = os.path.expanduser('~/test/THEMIS')
     install_dir = os.path.join(home_dir, 'nav_ws/install')
     src_dir = os.path.join(home_dir, 'nav_ws/src')
 
     # 基础节点（不需要等待的）
     memory_manager = ExecuteProcess(
-        cmd=['bash', '-c', 'cd ' + home_dir + ' && python3 -m Play.Navigation.memory_manager'],
+        cmd=['bash', '-c', 'cd ' + home_dir + ' && python3 -m Play.Navigation.memory_manager '
+             '--ros-args -p use_sim_time:=true'],
         name='memory_manager'
     )
 
     memory_pub = ExecuteProcess(
-        cmd=['bash', '-c', 'cd ' + home_dir + ' && python3 -m Play.Navigation.memory_pub'],
+        cmd=['bash', '-c', 'cd ' + home_dir + ' && python3 -m Play.Navigation.memory_pub '
+             '--ros-args -p use_sim_time:=true'],
         name='memory_pub'
     )
 
-    velocity_controller = ExecuteProcess(
-        cmd=['bash', '-c', 'PYTHONPATH=' + home_dir + ':$PYTHONPATH ' + install_dir + '/velocity_controller/bin/velocity_controller'],
-        name='velocity_controller'
+    interact_pub = ExecuteProcess(
+        cmd=['bash', '-c', 'cd ' + home_dir + ' && python3 -m Play.Navigation.interact_pub '
+             '--ros-args -p use_sim_time:=true'],
+        name='interact_pub'
     )
 
     # TF 相关节点（Rviz2 需要这些）
@@ -39,12 +42,14 @@ def generate_launch_description():
     )
 
     tf_launch = ExecuteProcess(
-        cmd=['bash', '-c', '. /opt/ros/humble/setup.bash && . ' + install_dir + '/setup.bash && ros2 launch ' + src_dir + '/depth_to_pcl/launch/tf_launch.py'],
+        cmd=['bash', '-c', '. /opt/ros/humble/setup.bash && . ' + install_dir + '/setup.bash && ros2 launch ' + src_dir + '/depth_to_pcl/launch/tf_launch.py '
+             'use_sim_time:=true'],
         name='tf_launch'
     )
 
     depth_to_pcl = ExecuteProcess(
-        cmd=['bash', '-c', '. /opt/ros/humble/setup.bash && . ' + install_dir + '/setup.bash && ros2 launch ' + src_dir + '/depth_to_pcl/launch/depth_to_pcl_launch.py'],
+        cmd=['bash', '-c', '. /opt/ros/humble/setup.bash && . ' + install_dir + '/setup.bash && ros2 launch ' + src_dir + '/depth_to_pcl/launch/depth_to_pcl_launch.py '
+             'use_sim_time:=true'],
         name='depth_to_pcl'
     )
 
@@ -66,7 +71,7 @@ def generate_launch_description():
     return LaunchDescription([
         memory_manager,
         memory_pub,
-        velocity_controller,
+        interact_pub,
         joint_tf_publisher,
         base_state_to_odom,
         tf_launch,

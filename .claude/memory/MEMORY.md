@@ -1,0 +1,4 @@
+- [GPU buffer 注册 — 表驱动模式](gpu-buffer-registration-pattern.md) — 新增 buffer 只需在 kSamplingBuffers[] 表中加一行
+- [最小流程原则](minimal-flow-principle.md) — 逐步搭建, 每个模块先拼已有类跑通端到端
+- [clangd 配置 5 坑](clangd-pitfalls.md) — isystem空格、GCC版本、.cu/.cuh识别、compile_commands优先级、ROS2嵌套头文件
+- [严禁拷贝旧代码](no-copy-old-code.md) — 旧包 nav2_custom_plugins 仅作算法参考, 不拷贝到 v2

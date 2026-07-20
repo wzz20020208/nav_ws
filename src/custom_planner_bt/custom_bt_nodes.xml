@@ -1,0 +1,9 @@
+<!-- custom_bt_nodes.xml -->
+<library path="custom_planner_bt">
+  <class type="nav2_custom_bt_nodes::IsPathDeviated"
+         base_class_type="BT::ConditionNode"/>
+  <class type="nav2_custom_bt_nodes::IsPathObstructed"
+         base_class_type="BT::ConditionNode"/>
+  <class type="nav2_custom_bt_nodes::ShouldReplan"
+         base_class_type="BT::ConditionNode"/>
+</library>

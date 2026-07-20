@@ -34,6 +34,8 @@ struct PathInfo {
   int   num_pts = 0;             ///< 路径点数量
   float path_tangent = 0.0f;     ///< 当前前瞻点路径切线方向 (rad), 供 PathAngleCritic
   float goal_yaw = 0.0f;         ///< 终点期望朝向 (rad), 供 PathAngleCritic 余弦退火
+  float goal_x = 0.0f;           ///< 终点世界坐标 x, 供 PathAngleCritic 算 dist_to_final
+  float goal_y = 0.0f;           ///< 终点世界坐标 y
 };
 
 /// 目标/速度参考 — 供 SPEED 大类代价函数使用 (GPU-compatible)
