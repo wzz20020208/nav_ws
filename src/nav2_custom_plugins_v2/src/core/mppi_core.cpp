@@ -29,12 +29,12 @@ void NoiseGenerator::generate(int N, int H, double path_yaw, double current_yaw)
   std::mt19937 rng(std::random_device{}());
   std::normal_distribution<float> gauss(0.0f, 1.0f);
 
-  const float bias_weight = 0.15f;
+  const float bias_weight = 0.0f;
   float lookahead_in_robot = static_cast<float>(path_yaw - current_yaw);
   const float bias_vx = bias_weight * cosf(lookahead_in_robot);
   const float bias_vy = bias_weight * sinf(lookahead_in_robot);
 
-  const float delta_bias_weight = 0.5f;
+  const float delta_bias_weight = 0.0f;
   float heading_err = static_cast<float>(path_yaw - current_yaw);
   while (heading_err > M_PI)  heading_err -= 2.0f * M_PI;
   while (heading_err < -M_PI) heading_err += 2.0f * M_PI;
