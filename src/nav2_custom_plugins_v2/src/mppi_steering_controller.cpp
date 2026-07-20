@@ -165,6 +165,12 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
     // GPU 端路径数据
     path_mgr_.buildPathInfo(path_info, lookahead_yaw);
 
+    // 路径末端: 朝向 target 切换到终点朝向
+    int path_size = static_cast<int>(global_plan_.poses.size());
+    if (lp.idx >= path_size - 1) {
+      path_info.path_tangent = path_info.goal_yaw;
+    }
+
     // target 方向 = 机器人→前瞻点, 转到机器人系 (与 vx/vy 同系)
     double dir_to_lh = std::atan2(lp.wy - start.y, lp.wx - start.x);
     path_mgr_.buildGoalInfo(goal_info, dir_to_lh - yaw);
