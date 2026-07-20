@@ -47,7 +47,7 @@ struct MPPIParams;
 /// 朝向判定结果
 struct HeadingDecision {
   bool   rotate_in_place = false;  ///< 是否需要原地旋转
-  double delta = 0.0;              ///< 目标朝向角 (rad)
+  double omega = 0.0;              ///< 目标朝向角 (rad), 已弃用, 保留兼容
   double omega_sign = 0.0;         ///< 旋转方向 ±1 (参考原版 max_w 旋转)
 };
 

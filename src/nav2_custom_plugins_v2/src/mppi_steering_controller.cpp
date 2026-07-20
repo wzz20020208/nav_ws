@@ -131,8 +131,12 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   // 无路径时返回零速度, 不跑 MPPI
   if (global_plan_.poses.empty()) {
     geometry_msgs::msg::TwistStamped cmd;
-    cmd.header.frame_id = "BASE_LINK";
+    cmd.header.frame_id = params_.use_global_mode ? "odom" : "BASE_LINK";
     cmd.header.stamp = node_.lock()->now();
+    if (params_.use_global_mode) {
+      double yaw = 2.0 * atan2(pose.pose.orientation.z, pose.pose.orientation.w);
+      cmd.twist.angular.z = yaw;  // global: angular.z = 目标朝向, 保持当前不转
+    }
     return cmd;
   }
 
@@ -192,11 +196,7 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
       cmd.header.stamp = node_.lock()->now();
       cmd.twist.linear.x = 0.0;
       cmd.twist.linear.y = 0.0;
-      if (params_.use_global_mode) {
-        cmd.twist.angular.z = dec.delta;  // 目标角度直出
-      } else {
-        cmd.twist.angular.z = dec.omega_sign * params_.max_w;  // max_w 旋转
-      }
+      cmd.twist.angular.z = dec.omega_sign * params_.max_w;  // 原地旋转, omega=±max_w
       return cmd;
     }
   }
@@ -262,7 +262,7 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   base_seq_.shiftAndDecay(0.5);
   base_seq_.vx.back()    = proc.control.vx;
   base_seq_.vy.back()    = proc.control.vy;
-  base_seq_.delta.back() = proc.control.delta;
+  base_seq_.omega.back() = proc.control.omega;
 
 
   // ── ⑬ 填充 TwistStamped ──
@@ -271,15 +271,15 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   cmd.header.stamp = node_.lock()->now();
   cmd.twist.linear.x  = proc.vx_out;
   cmd.twist.linear.y  = proc.vy_out;
-  // global 模式: delta_out (已转 odom 系); base_link 模式: omega
-  cmd.twist.angular.z = params_.use_global_mode ? proc.delta_out : proc.omega;
+  // global 模式: omega_out (已转 odom 系); base_link 模式: omega
+  cmd.twist.angular.z = proc.omega_out;
 
   // 同时发布自定义 VelocitySteering 消息
   if (steering_pub_) {
     msg::VelocitySteering vs;
     vs.vx = proc.control.vx;
     vs.vy = proc.control.vy;
-    vs.steering_angle = proc.control.delta;
+    vs.steering_angle = proc.control.omega;
     steering_pub_->publish(vs);
   }
 

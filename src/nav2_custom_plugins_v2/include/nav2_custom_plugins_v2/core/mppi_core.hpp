@@ -60,13 +60,12 @@ struct MPPIParams {
   double max_v = 0.4;
   double min_v = -0.4;
   double max_vy = 0.2;
-  double max_steering_angle = 0.785;
   double max_w = 0.6;
 
   // 噪声
   double action_std_v = 0.5;
   double action_std_vy = 0.5;
-  double action_std_delta = 0.3;
+  double action_std_w = 0.4;
 
   // 代价 (1:1 THEMIS)
   double lambda = 0.05;
@@ -121,11 +120,10 @@ inline constexpr DblParam kDblParams[] = {
   {"max_v",              &MPPIParams::max_v},
   {"min_v",              &MPPIParams::min_v},
   {"max_vy",             &MPPIParams::max_vy},
-  {"max_steering_angle", &MPPIParams::max_steering_angle},
   {"max_w",              &MPPIParams::max_w},
   {"action_std_v",       &MPPIParams::action_std_v},
   {"action_std_vy",      &MPPIParams::action_std_vy},
-  {"action_std_w",       &MPPIParams::action_std_delta},
+  {"action_std_w",       &MPPIParams::action_std_w},
   {"lambda",             &MPPIParams::lambda},
   {"cost_scale",         &MPPIParams::cost_scale},
   {"obstacle_ratio",     &MPPIParams::obstacle_ratio},
@@ -153,21 +151,20 @@ inline constexpr BoolParam kBoolParams[] = {
 // 基础类型
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 控制量 [vx, vy, delta]
+/// 控制量 [vx, vy, omega]
 struct Control {
   double vx = 0.0;
   double vy = 0.0;
-  double delta = 0.0;
+  double omega = 0.0;
 };
 
 /// warm-start 基序列: 上一帧最优控制量, 左移一位后作为本帧采样基线
 struct ControlSequence {
   std::vector<double> vx;
   std::vector<double> vy;
-  std::vector<double> delta;
+  std::vector<double> omega;
 
   void resize(int H);
-  /// 左移一位: [t0,t1,...,tH-1] → [t1,t2,...,tH-1*decay]
   void shiftAndDecay(double decay = 0.5);
   Control step(int t) const;
   Control step0() const { return step(0); }
@@ -198,7 +195,7 @@ struct LookaheadPoint {
 ///   噪声向 lookahead 方向偏移, 采样族围绕路径切线展开.
 ///   noise_vx += bias * cos(lookahead_in_robot)
 ///   noise_vy += bias * sin(lookahead_in_robot)
-///   noise_delta += 0.5 * heading_err
+///   noise_w += 0.5 * heading_err
 class NoiseGenerator {
 public:
   explicit NoiseGenerator(const MPPIParams &params);
@@ -208,13 +205,13 @@ public:
 
   const std::vector<float> &noise_vx()    const { return noise_vx_; }
   const std::vector<float> &noise_vy()    const { return noise_vy_; }
-  const std::vector<float> &noise_delta() const { return noise_delta_; }
+  const std::vector<float> &noise_w()     const { return noise_w_; }
 
 private:
   const MPPIParams &p_;
   std::vector<float> noise_vx_;
   std::vector<float> noise_vy_;
-  std::vector<float> noise_delta_;
+  std::vector<float> noise_w_;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -232,23 +229,17 @@ struct BatchTrajectories {
   std::vector<float> theta;       // [N×H] 轨迹点朝向 (rad), 代价计算用
   std::vector<float> vx;          // [N×H] 实际采用的控制量 vx
   std::vector<float> vy;          // [N×H] 实际采用的控制量 vy
-  std::vector<float> delta;       // [N×H] 实际采用的控制量 delta
+  std::vector<float> omega;       // [N×H] 实际采用的控制量 omega
 };
 
-/// 运动学积分: 位置全局系直接累加, 朝向限速跟踪 delta
+/// 运动学积分: 位置全局系直接累加, 朝向角速度积分
 inline RobotState kinematic_integrate(
     const RobotState &state, const Control &u, double dt, double max_w)
 {
   RobotState next = state;
   next.x += u.vx * dt;
   next.y += u.vy * dt;
-
-  double dtheta = u.delta - state.theta;
-  while (dtheta > M_PI)  dtheta -= 2.0 * M_PI;
-  while (dtheta < -M_PI) dtheta += 2.0 * M_PI;
-  dtheta = std::clamp(dtheta, -max_w * dt, max_w * dt);
-  next.theta += dtheta;
-
+  next.theta += std::clamp(u.omega, -max_w, max_w) * dt;
   return next;
 }
 
@@ -270,11 +261,9 @@ public:
   explicit KinematicModel(const MPPIParams& params);
 
   RobotState integrate(const RobotState& state, const Control& u, double dt) const;
-  double deltaToOmega(double delta, double current_theta, double dt) const;
 
 private:
   double max_w_;
-  double max_steering_angle_;
 };
 
 }  // namespace nav2_custom_plugins_v2

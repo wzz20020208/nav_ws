@@ -99,7 +99,7 @@ public:
   /// @return                           加权总代价
   __device__ float evaluate(
       float x, float y, float cos_t, float sin_t, float theta,
-      float vx, float vy, float delta,
+      float vx, float vy, float omega,
       const CostmapInfo &cmap, const Footprint &fp,
       const PathInfo &path, const GoalInfo &goal) const
   {
@@ -107,7 +107,7 @@ public:
     float obst = obstacle_.evaluate(x, y, cos_t, sin_t, vx, vy, cmap, fp);
 
     // HEADING:  路径对准 + 朝向对齐 (delta) + 走廊偏离
-    float head = heading_.evaluate(x, y, theta, delta, path);
+    float head = heading_.evaluate(x, y, theta, omega, path);
 
     // SPEED:    速度方向对齐前瞻点 (180° 对称)
     float spd  = speed_.evaluate(vx, vy, goal);

@@ -46,11 +46,11 @@ public:
   // ══════════════════════════════════════════════════════════
 
   /// 上传噪声序列 (NLN 混合采样结果, 每条轨迹每步一组噪声)
-  void uploadNoise(const float *vx, const float *vy, const float *delta,
+  void uploadNoise(const float *vx, const float *vy, const float *omega,
                    int N, int H, cudaStream_t stream);
 
   /// 上传 warm-start 基控制序列
-  void uploadBase(const float *vx, const float *vy, const float *delta,
+  void uploadBase(const float *vx, const float *vy, const float *omega,
                   int H, cudaStream_t stream);
 
   /// 上传代价地图 (需先 registerCostmap, 或直接传尺寸触发自动注册)

@@ -45,7 +45,7 @@ HeadingDecision StateMachine::evaluateHeading(
     } else {
       // 继续旋转
       dec.rotate_in_place = true;
-      dec.delta = lookahead_yaw;
+      dec.omega = lookahead_yaw;
       dec.omega_sign = (err > 0) ? 1.0 : -1.0;
     }
     return dec;
@@ -57,7 +57,7 @@ HeadingDecision StateMachine::evaluateHeading(
       dist_lh_to_goal >= 0.5)
   {
     dec.rotate_in_place = true;
-    dec.delta = lookahead_yaw;
+    dec.omega = lookahead_yaw;
     dec.omega_sign = (err > 0) ? 1.0 : -1.0;
     rotating_ = true;
   }

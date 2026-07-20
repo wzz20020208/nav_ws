@@ -37,7 +37,7 @@ __global__ void cost_eval_kernel(
     const float *__restrict__ traj_theta,    // [N×H]
     const float *__restrict__ sampled_vx,    // [N×H]
     const float *__restrict__ sampled_vy,    // [N×H]
-    const float *__restrict__ sampled_delta, // [N×H]
+    const float *__restrict__ sampled_omega, // [N×H]
     const CostmapInfo cmap,
     const Footprint   fp,
     const PathInfo    path,
@@ -63,12 +63,12 @@ __global__ void cost_eval_kernel(
     float theta  = traj_theta[idx];
     float vx     = sampled_vx[idx];
     float vy     = sampled_vy[idx];
-    float delta  = sampled_delta[idx];
+    float omega  = sampled_omega[idx];
 
     float cos_t = cosf(theta);
     float sin_t = sinf(theta);
 
-    total += mgr.evaluate(x, y, cos_t, sin_t, theta, vx, vy, delta,
+    total += mgr.evaluate(x, y, cos_t, sin_t, theta, vx, vy, omega,
                           cmap, fp, path, goal);
   }
 
@@ -99,13 +99,13 @@ void GPUEngine::launchCostKernel(
   auto *d_traj_theta = static_cast<const float *>(getDevicePtr(buf::traj_theta));
   auto *d_sampled_vx    = static_cast<const float *>(getDevicePtr(buf::sampled_vx));
   auto *d_sampled_vy    = static_cast<const float *>(getDevicePtr(buf::sampled_vy));
-  auto *d_sampled_delta = static_cast<const float *>(getDevicePtr(buf::sampled_delta));
+  auto *d_sampled_omega = static_cast<const float *>(getDevicePtr(buf::sampled_omega));
   auto *d_costs         = static_cast<float *>(getDevicePtr(buf::costs));
 
   int blocks = (N + 255) / 256;
   cost_eval_kernel<<<blocks, 256, 0, stream>>>(
       d_traj_x, d_traj_y, d_traj_theta,
-      d_sampled_vx, d_sampled_vy, d_sampled_delta,
+      d_sampled_vx, d_sampled_vy, d_sampled_omega,
       cmap, fp, path, goal, cost_scale, N, H, d_costs);
 
   cudaError_t e = cudaGetLastError();
@@ -129,7 +129,7 @@ __global__ void weighted_sum_kernel(
     const float *__restrict__ d_costs,         // [N]
     const float *__restrict__ d_sampled_vx,    // [N×H]
     const float *__restrict__ d_sampled_vy,    // [N×H]
-    const float *__restrict__ d_sampled_delta, // [N×H]
+    const float *__restrict__ d_sampled_omega, // [N×H]
     float *__restrict__ d_result_seq,          // [H×4] 输出
     float min_cost, float lambda, int N, int H)
 {
@@ -141,7 +141,7 @@ __global__ void weighted_sum_kernel(
   int base = t * 4;
   atomicAdd(&d_result_seq[base + 0], w * d_sampled_vx[s * H + t]);
   atomicAdd(&d_result_seq[base + 1], w * d_sampled_vy[s * H + t]);
-  atomicAdd(&d_result_seq[base + 2], w * d_sampled_delta[s * H + t]);
+  atomicAdd(&d_result_seq[base + 2], w * d_sampled_omega[s * H + t]);
   atomicAdd(&d_result_seq[base + 3], w);
 }
 
@@ -151,14 +151,14 @@ void GPUEngine::launchWeightedSumKernel(float min_cost, float lambda,
   auto *d_costs        = static_cast<const float *>(getDevicePtr(buf::costs));
   auto *d_sampled_vx   = static_cast<const float *>(getDevicePtr(buf::sampled_vx));
   auto *d_sampled_vy   = static_cast<const float *>(getDevicePtr(buf::sampled_vy));
-  auto *d_sampled_delta= static_cast<const float *>(getDevicePtr(buf::sampled_delta));
+  auto *d_sampled_omega= static_cast<const float *>(getDevicePtr(buf::sampled_omega));
   auto *d_result_seq   = static_cast<float *>(getDevicePtr(buf::result_seq));
 
   cudaMemsetAsync(d_result_seq, 0, H * 4 * sizeof(float), stream);
 
   int bpt = (N + 255) / 256;
   weighted_sum_kernel<<<dim3(bpt, H), 256, 0, stream>>>(
-      d_costs, d_sampled_vx, d_sampled_vy, d_sampled_delta,
+      d_costs, d_sampled_vx, d_sampled_vy, d_sampled_omega,
       d_result_seq, min_cost, lambda, N, H);
 
   cudaError_t e = cudaGetLastError();

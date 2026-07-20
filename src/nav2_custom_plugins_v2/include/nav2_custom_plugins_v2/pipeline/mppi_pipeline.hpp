@@ -96,7 +96,7 @@ public:
                                 int N, int H, cudaStream_t stream);
 
   /// 加权求和 + 下载最优控制序列
-  /// @return [H×4] 加权平均控制量 (vx_sum, vy_sum, delta_sum, weight_sum per step)
+  /// @return [H×4] 加权平均控制量 (vx_sum, vy_sum, omega_sum, weight_sum per step)
   std::vector<float> launchWeightedSum(float min_cost, float lambda,
                                        int N, int H, cudaStream_t stream);
 

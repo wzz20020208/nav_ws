@@ -78,9 +78,9 @@ class PathAlignCritic : public HeadingCritic
 {
 public:
   __device__ float compute(
-      float x, float y, float theta, float delta, const PathInfo &path) const
+      float x, float y, float theta, float omega, const PathInfo &path) const
   {
-    (void)theta; (void)delta;
+    (void)theta; (void)omega;
 
     if (path.num_pts < 2 || path.x == nullptr || path.y == nullptr) return 0.0f;
 
@@ -107,13 +107,12 @@ class PathAngleCritic : public HeadingCritic
 {
 public:
   __device__ float compute(
-      float x, float y, float theta, float delta, const PathInfo &path) const
+      float x, float y, float theta, float omega, const PathInfo &path) const
   {
     (void)x; (void)y;
 
-    float err_now = normalize_angle(theta - path.path_tangent);
-    float err_cmd = normalize_angle(delta - theta);
-    return err_now * err_now + err_cmd * err_cmd;
+    float err = sym_angle_diff(theta, path.path_tangent);
+    return 4.0f * err * err;
   }
 };
 
@@ -128,9 +127,9 @@ class PathDeviationCritic : public HeadingCritic
 {
 public:
   __device__ float compute(
-      float x, float y, float theta, float delta, const PathInfo &path) const
+      float x, float y, float theta, float omega, const PathInfo &path) const
   {
-    (void)theta; (void)delta;
+    (void)theta; (void)omega;
 
     if (path.num_pts < 2 || path.x == nullptr || path.y == nullptr) return 0.0f;
 
@@ -168,7 +167,7 @@ public:
   //   theta  — 当前朝向 (PathAngle 使用)
   //   path   — 路径数据 (所有子类使用)
 
-  typedef float (*SubFn)(float x, float y, float theta, float delta,
+  typedef float (*SubFn)(float x, float y, float theta, float omega,
                          const PathInfo &path);
 
   /// 注册表条目: { 函数指针, 开关, 大类内权重 }
@@ -184,24 +183,24 @@ public:
   // ═════════════════════════════════════════════════════════════════════════
 
   __device__ static float pathAlignFn(
-      float x, float y, float theta, float delta, const PathInfo &path)
+      float x, float y, float theta, float omega, const PathInfo &path)
   {
     PathAlignCritic c;
-    return c.compute(x, y, theta, delta, path);
+    return c.compute(x, y, theta, omega, path);
   }
 
   __device__ static float pathAngleFn(
-      float x, float y, float theta, float delta, const PathInfo &path)
+      float x, float y, float theta, float omega, const PathInfo &path)
   {
     PathAngleCritic c;
-    return c.compute(x, y, theta, delta, path);
+    return c.compute(x, y, theta, omega, path);
   }
 
   __device__ static float pathDeviationFn(
-      float x, float y, float theta, float delta, const PathInfo &path)
+      float x, float y, float theta, float omega, const PathInfo &path)
   {
     PathDeviationCritic c;
-    return c.compute(x, y, theta, delta, path);
+    return c.compute(x, y, theta, omega, path);
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -234,7 +233,7 @@ public:
   /// 遍历注册表 → 函数指针直调 → 加权平均
   /// @return HEADING 大类归一化代价 (类内平均后)
   __device__ float evaluate(
-      float x, float y, float theta, float delta, const PathInfo &path) const
+      float x, float y, float theta, float omega, const PathInfo &path) const
   {
     float total = 0.0f;
     int active = 0;
@@ -242,7 +241,7 @@ public:
     for (int i = 0; i < count_; ++i) {
       const SubEntry &e = subs_[i];
       if (!e.enabled) continue;
-      total += e.weight * e.fn(x, y, theta, delta, path);
+      total += e.weight * e.fn(x, y, theta, omega, path);
       active++;
     }
 

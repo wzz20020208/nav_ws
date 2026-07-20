@@ -160,7 +160,7 @@ void VisualizationPublisher::publish(
     m.lifetime = lifetime;
     char buf[64];
     snprintf(buf, sizeof(buf), "vx=%.2f vy=%.2f ang=%.2f",
-             cmd.vx, cmd.vy, cmd.delta);
+             cmd.vx, cmd.vy, cmd.omega);
     m.text = buf;
     ma.markers.push_back(m);
   }

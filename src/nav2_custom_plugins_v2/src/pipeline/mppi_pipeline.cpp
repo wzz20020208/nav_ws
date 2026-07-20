@@ -44,7 +44,7 @@ MPPIPipeline::MPPIPipeline(GPUEngine &engine, GPUUploader &uploader,
 //   y     → buf::traj_y        轨迹点全局 y 坐标 [N×H], 同上
 //   vx    → buf::sampled_vx    实际控制量 vx [N×H], 速度代价项
 //   vy    → buf::sampled_vy    实际控制量 vy [N×H], 同上
-//   delta → buf::sampled_delta 实际控制量 delta [N×H], 朝向代价项
+//   delta → buf::sampled_omega 实际控制量 delta [N×H], 朝向代价项
 //
 // GPU 代价 kernel 拿 (x,y) 去 costmap 双线性插值 → 障碍物代价,
 // 拿 (vx,vy,delta) 对比期望速度和朝向 → 速度/朝向代价。
@@ -66,7 +66,7 @@ void MPPIPipeline::uploadRollout(const BatchTrajectories &traj,
     {buf::traj_theta,   traj.theta.data()},
     {buf::sampled_vx,    traj.vx.data()},
     {buf::sampled_vy,    traj.vy.data()},
-    {buf::sampled_delta, traj.delta.data()},
+    {buf::sampled_omega, traj.omega.data()},
   };
   for (auto &e : map) engine_.upload(e.name, e.data, stream);
 
@@ -87,7 +87,7 @@ void MPPIPipeline::uploadRollout(const BatchTrajectories &traj,
 // 上传 3 个数组 → GPU:
 //   base.vx    → buf::base_vx     [H], 采样时 buf.base_vx[t] 读取
 //   base.vy    → buf::base_vy     [H]
-//   base.delta → buf::base_delta  [H]
+//   base.omega → buf::base_w  [H]
 //
 // @param base   H 步基控制序列 (内部为 std::vector<double>)
 // @param H      horizon 步数
@@ -99,7 +99,7 @@ void MPPIPipeline::uploadBase(const ControlSequence &base, int H,
   const struct { const char *name; const double *data; } map[] = {
     {buf::base_vx,    base.vx.data()},
     {buf::base_vy,    base.vy.data()},
-    {buf::base_delta, base.delta.data()},
+    {buf::base_w, base.omega.data()},
   };
   for (auto &e : map) engine_.upload(e.name, e.data, stream);
   (void)H;

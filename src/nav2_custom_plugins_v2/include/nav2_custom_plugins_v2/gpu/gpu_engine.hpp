@@ -41,17 +41,17 @@ namespace buf
   // 输入 — 噪声 (N×H)
   inline constexpr char noise_vx[]    = "noise_vx";
   inline constexpr char noise_vy[]    = "noise_vy";
-  inline constexpr char noise_delta[] = "noise_delta";
+  inline constexpr char noise_w[] = "noise_w";
 
   // 输入 — warm-start 基序列 (H)
   inline constexpr char base_vx[]     = "base_vx";
   inline constexpr char base_vy[]     = "base_vy";
-  inline constexpr char base_delta[]  = "base_delta";
+  inline constexpr char base_w[]  = "base_w";
 
   // 输出 — 采样控制量 (N×H)
   inline constexpr char sampled_vx[]    = "sampled_vx";
   inline constexpr char sampled_vy[]    = "sampled_vy";
-  inline constexpr char sampled_delta[] = "sampled_delta";
+  inline constexpr char sampled_omega[] = "sampled_omega";
 
   // 输出 — 代价 (N)
   inline constexpr char costs[] = "costs";

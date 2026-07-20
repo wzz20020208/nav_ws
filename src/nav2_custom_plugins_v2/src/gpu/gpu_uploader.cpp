@@ -29,15 +29,15 @@ namespace {
     // ── 噪声 (CPU 预生成, 每帧上传) ──
     {buf::noise_vx,    BufSize::NxH},
     {buf::noise_vy,    BufSize::NxH},
-    {buf::noise_delta, BufSize::NxH},
+    {buf::noise_w, BufSize::NxH},
     // ── 基序列 (warm-start, 每帧移位后上传) ──
     {buf::base_vx,     BufSize::H},
     {buf::base_vy,     BufSize::H},
-    {buf::base_delta,  BufSize::H},
+    {buf::base_w,  BufSize::H},
     // ── 采样控制量 (kernel 输出) ──
     {buf::sampled_vx,    BufSize::NxH},
     {buf::sampled_vy,    BufSize::NxH},
-    {buf::sampled_delta, BufSize::NxH},
+    {buf::sampled_omega, BufSize::NxH},
     // ── 代价 (kernel 输出) ──
     {buf::costs,       BufSize::N},
     // ── 加权结果序列 (kernel 输出) ──
@@ -87,23 +87,23 @@ void GPUUploader::registerPath(int n)
 // ═══════════════════════════════════════════════════════════════════════════
 
 void GPUUploader::uploadNoise(const float *vx, const float *vy,
-                              const float *delta,
+                              const float *omega,
                               int N, int H, cudaStream_t stream)
 {
   engine_.upload(buf::noise_vx,   vx,    stream);
   engine_.upload(buf::noise_vy,   vy,    stream);
-  engine_.upload(buf::noise_delta, delta, stream);
+  engine_.upload(buf::noise_w, omega, stream);
   (void)N;
   (void)H;
 }
 
 void GPUUploader::uploadBase(const float *vx, const float *vy,
-                             const float *delta,
+                             const float *omega,
                              int H, cudaStream_t stream)
 {
   engine_.upload(buf::base_vx,    vx,    stream);
   engine_.upload(buf::base_vy,    vy,    stream);
-  engine_.upload(buf::base_delta, delta, stream);
+  engine_.upload(buf::base_w, omega, stream);
   (void)H;
 }
 
