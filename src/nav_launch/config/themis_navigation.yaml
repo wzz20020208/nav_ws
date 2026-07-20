@@ -5,8 +5,8 @@ bt_navigator:
     robot_base_frame: BASE_LINK
     odom_topic: /odom
     thread_count: 8
-    default_nav_to_pose_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/install/navigation/share/navigation/param/auto_nav.xml"
-    default_nav_through_poses_bt_xml: "/home/wzz2002/THEMIS/THEMIS/nav_ws/install/navigation/share/navigation/param/auto_nav.xml"
+    default_nav_to_pose_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
+    default_nav_through_poses_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
     bt_loop_duration: 100
     default_server_timeout: 1000
     enable_groot_monitoring: True
@@ -76,22 +76,22 @@ controller_server:
       yaw_goal_tolerance: 0.17
 
     FollowPath:
-      plugin: "nav2_custom_plugins/MPPIGPUController"
+      plugin: "nav2_custom_plugins_v2/MPPISteeringController"
 
       # 归一化代价: total = cost_scale × (obstacle_ratio·obs + tracking_ratio·trk + speed_ratio·spd) / horizon
-      cost_scale: 30.0
-      obstacle_ratio: 0.10
-      tracking_ratio: 0.30
-      speed_ratio: 0.60
+      cost_scale: 50.0
+      obstacle_ratio: 0.70
+      tracking_ratio: 0.20
+      speed_ratio: 0.05
       # 独立偏离路径代价 (软墙)
       path_deviation_weight: 0.0
       path_corridor: 0.15
 
-      num_samples: 3000
-      prediction_horizon: 15
+      num_samples: 8000
+      prediction_horizon: 5
       dt: 0.1
       max_v: 0.40
-      min_v: -0.40   # 与 max_v 对称
+      min_v: -0.40
       max_vy: 0.20
       max_w: 0.60
 
@@ -99,16 +99,23 @@ controller_server:
       action_std_vy: 0.5
       action_std_w: 0.4
       nln_ratio: 0.35
+      nln_sigma_mult: 2.0
       noise_decay_rate: 0.55
       noise_scale_floor_vx: 0.35
       noise_scale_floor_vy: 0.30
       noise_scale_floor_w: 0.30
       cross_track_noise_scale: 1.5
 
+      guidance_weight: 0.7            # 路径引导混合 (0=纯噪声, 1=纯引导)
       turn_lateral_boost: 2.0
-      lateral_guidance_scale: 0.7   # vx/vy采样向lookahead方向混合比例
+      lateral_guidance_scale: 0.7     # vx/vy采样向lookahead方向混合比例
 
-      lambda: 2.0     # 稍尖锐, 让低代价样本更有话语权, 避免输出趋于零
+      spatial_decay_weight: 0.3       # 空间进度权重 (vs 时间进度)
+      exploration_decay_start: 2.0    # 探索范围开始衰减距离 (m)
+      exploration_decay_end: 0.3      # 探索范围衰减结束距离 (m)
+      exploration_decay_floor: 0.3    # 探索范围衰减下限
+
+      lambda: 0.05    # 贪心: Δcost=0.1→~7×权重差
 
       footprint_front: 0.17
       footprint_back: 0.17
@@ -117,7 +124,7 @@ controller_server:
       footprint_sample_spacing: 0.04
       rear_obstacle_cost: 0.0
 
-      min_lookahead_dist: 0.4
+      min_lookahead_dist: 0.3
       lookahead_kp: 1.0
 
       terminal_angle_dist: 0.0
@@ -147,53 +154,55 @@ local_costmap:
   local_costmap:
     ros__parameters:
       update_frequency: 5.0
-      publish_frequency: 5.0
-      transform_tolerance: 1.0
+      publish_frequency: 2.0
       global_frame: odom
       robot_base_frame: BASE_LINK
-      use_sim_time: True
-      rolling_window: True
-      track_unknown_space: False
-      width: 4
-      height: 4
+      use_sim_time: true
+      rolling_window: true
+      width: 3
+      height: 3
       resolution: 0.05
-      footprint: "[ [0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30] ]"
-      footprint_padding: 0.02
-      plugins: ["obstacle_layer", "inflation_layer"]
+      footprint: "[[0.20, 0.30], [0.20, -0.30], [-0.20, -0.30], [-0.20, 0.30]]"
 
-      
-      inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.25
-        cost_scaling_factor: 5.0
-
-      obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
+      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        map_topic: /rtabmap/map
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
-        observation_sources: point_zedxm
-        max_obstacle_height: 0.8
-        min_obstacle_height: 0.1
-        point_zedxm:
+        publish_voxel_map: True 
+        
+        # --- 控制体素网格的整体高度 ---
+        origin_z: 0.0            
+        z_resolution: 0.1        # Z轴分辨率 10cm
+        z_voxels: 14             # 14层 * 0.1m = 1.4m 的总网格高度 (覆盖机器人的 1.2m 身高)
+        
+        # ★ 核心参数：决定哪些高度的障碍物会被投影到2D地图上
+        max_obstacle_height: 1.7 # 忽略 1.3m 以上的障碍物，允许机器人从下方穿过
+        
+        # 未知区域处理（如果雷达扫不到上方，默认上方是安全的）
+        unknown_threshold: 15
+        mark_threshold: 0
+
+        observation_sources: pointcloud_sensor
+        pointcloud_sensor:
           topic: /chest_camera/points_sparse
-          expected_update_rate: 1.0
-          max_obstacle_height: 0.8
-          min_obstacle_height: -0.1
-          observation_persistence: 0.0
+          data_type: "PointCloud2"
+          
+          # ★ 核心参数：在数据源头过滤掉不需要关心的高空点云
+          max_obstacle_height: 1.7 # 高于 1.3m 的雷达点云直接扔掉，节省 CPU 算力
+          min_obstacle_height: 0.1 # 过滤掉 0.1m 以下的地面点云
+          
+          obstacle_max_range: 3.0
+          raytrace_max_range: 3.5
           clearing: True
           marking: True
-          raytrace_max_range: 2.0
-          raytrace_min_range: 0.1
-          obstacle_max_range: 2.0
-          obstacle_min_range: 0.1
-          data_type: "PointCloud2"
-
-      always_send_full_costmap: True
-  local_costmap_client:
-    ros__parameters:
-      use_sim_time: True
-  local_costmap_rclcpp_node:
-    ros__parameters:
-      use_sim_time: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 2.0    # 平缓衰减 → 通道内形成平滑梯度引导走中间
+        inflation_radius: 0.5       # 大膨胀半径 → 势场覆盖整个通道宽度
 
 global_costmap:
   global_costmap:
