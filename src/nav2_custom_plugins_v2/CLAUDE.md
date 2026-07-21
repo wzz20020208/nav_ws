@@ -220,13 +220,13 @@ evaluateHeading(current_yaw, lookahead_yaw, dist_lh_to_goal, params)
   │     else → 继续旋转
   │
   └── 首次判定:
-        abs(err) > threshold
-        AND dist(lh,goal) ≥ 0.5m → HEADING_MISALIGN
+        abs(err) > threshold → HEADING_MISALIGN
         else → NORMAL
 
 HEADING_MISALIGN 时:
+  - dec.omega = current_yaw + err → [-π,π] 最短路径目标角度
   - base_link 模式: angular.z = sign(err) × max_w
-  - global 模式:   angular.z = delta (目标角度)
+  - global 模式:   angular.z = dec.omega
   - 跳过整个 MPPI 管线 (noise gen / rollout / GPU)
 ```
 
