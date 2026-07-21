@@ -1,5 +1,7 @@
 # THEMIS Navigation Workspace
 
+> **规则**: 任何代码修改 (Edit/Write) 必须先经用户确认同意，不得擅自改动。分析问题可以自由做，但改代码要问过。
+
 ## 工作区结构
 
 ```
@@ -16,9 +18,9 @@ nav_ws/
 
 ### 控制空间
 
-`[vx, vy, delta]` — 解耦模型:
-- **vx, vy**: 全局初始朝向系线速度, 不随机器人朝向旋转
-- **delta**: 目标身体朝向角, 以 max_w 限速跟踪, 不影响线速度方向
+`[vx, vy, omega]` — 1:1 THEMIS 模型:
+- **vx, vy**: body 系线速度 (前/左), 运动学积分时按当前 theta 旋转到世界系
+- **omega**: body 系角速度, 直接积入 theta
 
 ### 文件结构
 
@@ -261,16 +263,17 @@ HEADING_MISALIGN 时:
 ## 运动学
 
 ```
-位置 (全局系, 无需旋转):
-  x += vx * dt
-  y += vy * dt
+vx, vy 为 body 系 (前/左), 积分时旋转到世界系:
+  x += (vx·cos θ - vy·sin θ) · dt
+  y += (vx·sin θ + vy·cos θ) · dt
+  theta += clamp(omega, ±max_w) · dt
 
-朝向 (max_w 限速向 delta 靠拢):
-  dtheta = clamp(normalize(delta - theta), ±max_w*dt)
-  theta += dtheta
-
-δ → ω (TwistStamped 兼容):
-  omega = clamp(normalize(delta - theta) / dt, ±max_w)
+坐标系一致性:
+  - rollout vx, vy: body 系 (前/左)
+  - GoalInfo target_vx_r, target_vy_r: body 系 (dir_to_lh - yaw)
+  - NoiseGenerator 偏置: body 系 (path_yaw - current_yaw)
+  - PostProcessor global 模式: body→odom 旋转 (vx_out = vx·c - vy·s)
+  - PostProcessor base_link 模式: 原样输出 (body 系)
 ```
 
 ## 消息

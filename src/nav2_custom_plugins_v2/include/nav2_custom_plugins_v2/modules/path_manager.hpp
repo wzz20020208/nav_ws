@@ -74,8 +74,9 @@ public:
   // 前瞻点
   // ═════════════════════════════════════════════════════════════════════════
 
-  /// 沿路径前推 min_dist → 返回前瞻点
-  LookaheadResult computeLookahead(int closest_idx, double min_dist) const;
+  /// 1:1 THEMIS: 沿路径扫描, Euclidean 距离 ≥ min_dist 的首个点, 默认终点兜底
+  LookaheadResult computeLookahead(int closest_idx, double min_dist,
+                                    double robot_x, double robot_y) const;
 
   // ═════════════════════════════════════════════════════════════════════════
   // 推荐朝向 (两种来源)

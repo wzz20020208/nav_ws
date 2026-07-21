@@ -18,7 +18,6 @@
 #include "nav2_custom_plugins_v2/modules/velocity_postprocessor.hpp"
 #include "nav2_custom_plugins_v2/modules/state_machine.hpp"
 #include "nav2_custom_plugins_v2/modules/visualization.hpp"
-#include "nav2_custom_plugins_v2/msg/velocity_steering.hpp"
 
 namespace nav2_custom_plugins_v2
 {
@@ -68,14 +67,13 @@ private:
   PathManager                        path_mgr_;            // 路径管理 (最近点/前瞻/yaw)
   std::unique_ptr<VelocityPostProcessor> vel_postprocessor_; // 控制量后处理 (提取+clamp+δ→ω)
   StateMachine                        state_machine_;        // 状态机 (heading 原地旋转判定)
+  bool                                in_terminal_align_ = false;  // 终端对齐迟滞: 进入后不轻易退出
   VisualizationPublisher              vis_pub_;              // RViz 可视化
   ControlSequence                     base_seq_;             // warm-start 基序列
 
   // ── 输出 ──
-  rclcpp::Publisher<nav2_custom_plugins_v2::msg::VelocitySteering>::SharedPtr
-    steering_pub_;                       // /cmd_vel_steering 发布器
-  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr
-    cmd_vel_pub_;                        // /mppi_cmd_vel 独立话题, 与 Nav2 隔离
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr
+    twist_pub_;                          // /cmd_vel_mppi 独立话题
 };
 
 }  // namespace nav2_custom_plugins_v2

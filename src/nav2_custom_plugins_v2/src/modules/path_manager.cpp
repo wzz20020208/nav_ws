@@ -51,30 +51,28 @@ int PathManager::findClosestIndex(double robot_x, double robot_y) const
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// computeLookahead — 沿路径前推 min_dist
+// computeLookahead — 1:1 THEMIS: Euclidean 距离 ≥ min_dist 的首个点, 默认终点兜底
 // ═══════════════════════════════════════════════════════════════════════════════
 
 LookaheadResult PathManager::computeLookahead(
-    int closest_idx, double min_dist) const
+    int closest_idx, double min_dist, double robot_x, double robot_y) const
 {
   LookaheadResult result;
   if (!valid()) return result;
 
-  int n = static_cast<int>(plan_.poses.size());
-  int idx = std::clamp(closest_idx, 0, n - 1);
-  double traveled = 0.0;
+  int last_idx = static_cast<int>(plan_.poses.size()) - 1;
+  int lh_idx = last_idx;  // 默认终点, 未达标时兜底
 
-  for (int i = idx; i < n - 1 && traveled < min_dist; ++i) {
-    double dx = plan_.poses[i + 1].pose.position.x - plan_.poses[i].pose.position.x;
-    double dy = plan_.poses[i + 1].pose.position.y - plan_.poses[i].pose.position.y;
-    traveled += std::sqrt(dx * dx + dy * dy);
-    idx = i + 1;
+  for (int i = closest_idx; i <= last_idx; ++i) {
+    double dx = plan_.poses[i].pose.position.x - robot_x;
+    double dy = plan_.poses[i].pose.position.y - robot_y;
+    if (std::hypot(dx, dy) >= min_dist) { lh_idx = i; break; }
   }
 
-  result.idx  = idx;
-  result.wx   = plan_.poses[idx].pose.position.x;
-  result.wy   = plan_.poses[idx].pose.position.y;
-  result.dist = traveled;
+  result.idx  = lh_idx;
+  result.wx   = plan_.poses[lh_idx].pose.position.x;
+  result.wy   = plan_.poses[lh_idx].pose.position.y;
+  result.dist = std::hypot(result.wx - robot_x, result.wy - robot_y);
 
   return result;
 }
@@ -132,7 +130,7 @@ void PathManager::buildPathInfo(PathInfo &info, double path_tangent) const
 
 void PathManager::buildGoalInfo(GoalInfo &info, double target_yaw) const
 {
-  // 期望速度方向 (全局初始朝向系)
+  // 期望速度方向 (机器人 body 系, 与 rollout vx/vy 同系)
   info.target_vx_r = static_cast<float>(std::cos(target_yaw));
   info.target_vy_r = static_cast<float>(std::sin(target_yaw));
 

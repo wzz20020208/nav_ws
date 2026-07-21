@@ -26,7 +26,8 @@ void VisualizationPublisher::publish(
     const BatchTrajectories &batch,
     const std::vector<float> &costs,
     int best_idx, int N, int H,
-    const Control &cmd, bool global_mode)
+    const Control &cmd, bool global_mode,
+    const std::string &frame_id)
 {
   if (!pub_) return;
 
@@ -41,7 +42,7 @@ void VisualizationPublisher::publish(
   // ── ① 机器人朝向箭头 (青色) ──
   {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 0; m.type = m.ARROW; m.action = m.ADD;
     m.pose.position.x = rx; m.pose.position.y = ry; m.pose.position.z = 0.08;
     m.pose.orientation.z = std::sin(rt * 0.5); m.pose.orientation.w = std::cos(rt * 0.5);
@@ -54,7 +55,7 @@ void VisualizationPublisher::publish(
   // ── ② 前瞻点小球 (黄色) ──
   {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 1; m.type = m.SPHERE; m.action = m.ADD;
     m.pose.position.x = static_cast<float>(lh.wx);
     m.pose.position.y = static_cast<float>(lh.wy);
@@ -68,7 +69,7 @@ void VisualizationPublisher::publish(
   // ── ③ 机器人→前瞻点连线 (橙色) ──
   {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 2; m.type = m.LINE_STRIP; m.action = m.ADD;
     m.points.resize(2);
     m.points[0].x = rx;                        m.points[0].y = ry;                        m.points[0].z = 0.10;
@@ -82,7 +83,7 @@ void VisualizationPublisher::publish(
   // ── ④ 最优轨迹 (绿色 LINE_STRIP) ──
   if (best_idx >= 0 && best_idx < N) {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 3; m.type = m.LINE_STRIP; m.action = m.ADD;
     m.points.resize(H);
     for (int t = 0; t < H; ++t) {
@@ -101,7 +102,7 @@ void VisualizationPublisher::publish(
   {
     int step = std::max(1, N / num_vis_trajs_);
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 4; m.type = m.LINE_LIST; m.action = m.ADD;
     int n_segments = 0;
     for (int s = 0; s < N; s += step) {
@@ -137,7 +138,7 @@ void VisualizationPublisher::publish(
 
       double arrow_len = spd * 1.5;
       visualization_msgs::msg::Marker m;
-      m.header.frame_id = "odom"; m.header.stamp = now;
+      m.header.frame_id = frame_id; m.header.stamp = now;
       m.ns = "mppi"; m.id = 5; m.type = m.ARROW; m.action = m.ADD;
       m.points.resize(2);
       m.points[0].x = rx;                                m.points[0].y = ry;                                m.points[0].z = 0.09;
@@ -152,7 +153,7 @@ void VisualizationPublisher::publish(
   // ── ⑦ 指令数值文本 (白色) ──
   {
     visualization_msgs::msg::Marker m;
-    m.header.frame_id = "odom"; m.header.stamp = now;
+    m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 6; m.type = m.TEXT_VIEW_FACING; m.action = m.ADD;
     m.pose.position.x = rx + 0.3f; m.pose.position.y = ry + 0.3f; m.pose.position.z = 0.20;
     m.scale.z = 0.07;

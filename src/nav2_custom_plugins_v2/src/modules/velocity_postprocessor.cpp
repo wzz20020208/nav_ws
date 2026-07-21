@@ -1,6 +1,11 @@
 /**
  * @file velocity_postprocessor.cpp
- * @brief VelocityPostProcessor — 提取 + clamp (omega 即角速度, 无需转换)
+ * @brief VelocityPostProcessor — 提取 + clamp + omega→delta 转换
+ *
+ * 内部: vx/vy/omega 全部为 body 系角速度 (用于 warm-start 和 MPPI rollout)
+ * 输出:
+ *   global    → vx/vy 旋转到 odom 系, omega→delta = normalize_angle(yaw + omega*dt) (目标角度)
+ *   base_link → vx/vy/omega 直出 (body 系角速度)
  */
 
 #include "nav2_custom_plugins_v2/modules/velocity_postprocessor.hpp"
@@ -19,19 +24,31 @@ VelocityPostProcessor::process(const std::vector<float> &result,
                                double current_yaw, bool global_mode)
 {
   ProcessedCommand out;
-  out.control     = clamp(extractStep0(result));
   out.global_mode = global_mode;
+  Control raw = extractStep0(result);
+
+  // vx, vy 始终是 body 系线速度, 始终限幅
+  raw.vx = std::clamp(raw.vx, p_.min_v, p_.max_v);
+  raw.vy = std::clamp(raw.vy, -p_.max_vy, p_.max_vy);
+  // omega 是 inner 角速度, clamp 到物理极限 (warm-start 用)
+  raw.omega = std::clamp(raw.omega, -p_.max_w, p_.max_w);
+
+  out.control = raw;  // warm-start: 始终 body 系角速度
 
   if (global_mode) {
+    // global: body→odom 旋转 + omega→delta 目标角度
     double c = std::cos(current_yaw), s = std::sin(current_yaw);
-    out.vx_out    = out.control.vx * c - out.control.vy * s;
-    out.vy_out    = out.control.vx * s + out.control.vy * c;
-    out.omega_out = out.control.omega;
+    out.vx_out    = raw.vx * c - raw.vy * s;
+    out.vy_out    = raw.vx * s + raw.vy * c;
+    double delta  = current_yaw + raw.omega * p_.dt;
+    out.omega_out = std::atan2(std::sin(delta), std::cos(delta));
   } else {
-    out.vx_out    = out.control.vx;
-    out.vy_out    = out.control.vy;
-    out.omega_out = out.control.omega;
+    // base_link: body 系直出
+    out.vx_out    = raw.vx;
+    out.vy_out    = raw.vy;
+    out.omega_out = raw.omega;
   }
+
   return out;
 }
 

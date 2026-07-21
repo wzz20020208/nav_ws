@@ -78,70 +78,59 @@ controller_server:
     FollowPath:
       plugin: "nav2_custom_plugins_v2/MPPISteeringController"
 
-      # 归一化代价: total = cost_scale × (obstacle_ratio·obs + tracking_ratio·trk + speed_ratio·spd) / horizon
-      cost_scale: 50.0
-      obstacle_ratio: 0.70
-      tracking_ratio: 0.20
-      speed_ratio: 0.05
-      # 独立偏离路径代价 (软墙)
-      path_deviation_weight: 0.0
-      path_corridor: 0.15
-
+      # ── 控制空间 ──
       num_samples: 8000
       prediction_horizon: 5
       dt: 0.1
       max_v: 0.40
       min_v: -0.40
       max_vy: 0.20
-      max_w: 0.60
+      max_w: 10.0
 
+      # ── 代价 ──
+      cost_scale: 50.0
+      obstacle_ratio: 0.50
+      tracking_ratio: 0.40
+      speed_ratio: 0.10
+      lambda: 0.05
+
+      # ── 噪声 ──
       action_std_v: 0.5
       action_std_vy: 0.5
       action_std_w: 0.4
-      nln_ratio: 0.35
-      nln_sigma_mult: 2.0
-      noise_decay_rate: 0.55
-      noise_scale_floor_vx: 0.35
-      noise_scale_floor_vy: 0.30
-      noise_scale_floor_w: 0.30
-      cross_track_noise_scale: 1.5
 
-      guidance_weight: 0.7            # 路径引导混合 (0=纯噪声, 1=纯引导)
-      turn_lateral_boost: 2.0
-      lateral_guidance_scale: 0.7     # vx/vy采样向lookahead方向混合比例
-
-      spatial_decay_weight: 0.3       # 空间进度权重 (vs 时间进度)
-      exploration_decay_start: 2.0    # 探索范围开始衰减距离 (m)
-      exploration_decay_end: 0.3      # 探索范围衰减结束距离 (m)
-      exploration_decay_floor: 0.3    # 探索范围衰减下限
-
-      lambda: 0.05    # 贪心: Δcost=0.1→~7×权重差
-
+      # ── 碰撞 ──
       footprint_front: 0.17
       footprint_back: 0.17
       footprint_left: 0.28
       footprint_right: 0.28
-      footprint_sample_spacing: 0.04
-      rear_obstacle_cost: 0.0
 
+      # ── 前瞻 ──
       min_lookahead_dist: 0.3
-      lookahead_kp: 1.0
+      lookahead_kp: 0.1               # 前瞻减速最低比例 (0=完全停止)
+      lookahead_decel_dist: 0.5        # 开始减速距离 (m)
+      lookahead_overshoot_weight: 5.0  # 越界惩罚系数
 
-      terminal_angle_dist: 0.0
-      terminal_angle_kp: 0.0
-      terminal_angle_tolerance: 0.0
+      # ── 终端朝向: 距终点此距离内直接发 goal_yaw ──
+      terminal_angle_dist: 0.05
+      terminal_angle_tolerance: 0.17
 
-      global_trajectory_ratio: 0.3
-      global_horizon: 50
+      # ── 路径 / 输出模式 ──
+      use_planner_yaw: true           # true=planner朝向, false=自算切线
+      use_global_mode: true           # true=odom系输出, false=base_link系
 
-      pure_rotation_ratio: 0.10
-      pure_rotation_steps: 2
-      enable_lateral_bias: false
+      # ── 状态机 ──
       enable_heading_speed_limit: true
       heading_misalign_threshold: 1.047
       enable_narrow_passage: false
+
+      # ── EMA ──
       enable_ema: false
       ema_alpha: 0.1
+
+      # ── 日志 ──
+      enable_file_log: true
+      log_file_path: "/tmp/mppi_steering_controller.log"
 
 
 
@@ -202,7 +191,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0    # 平缓衰减 → 通道内形成平滑梯度引导走中间
-        inflation_radius: 0.05      # 5cm 膨胀, MPPI 足迹碰撞处理实际矩形
+        inflation_radius: 0.20
 
 global_costmap:
   global_costmap:
@@ -237,7 +226,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 2.0
-        inflation_radius: 0.05      # 5cm 膨胀, MPPI 足迹碰撞处理实际矩形
+        inflation_radius: 0.20
 
 
 planner_server:

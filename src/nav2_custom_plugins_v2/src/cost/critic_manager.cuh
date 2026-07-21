@@ -74,9 +74,9 @@ public:
     obstacle_.init();
     heading_ .init();
     speed_   .init();
-    cat_weights_[0] = 0.70f; // OBSTACLE — 1:1 THEMIS
-    cat_weights_[1] = 0.20f; // HEADING
-    cat_weights_[2] = 0.05f; // SPEED
+    cat_weights_[0] = 0.60f; // OBSTACLE
+    cat_weights_[1] = 0.30f; // HEADING
+    cat_weights_[2] = 0.10f; // SPEED
   }
 
   __host__ __device__ void setCategoryWeight(CriticCategory cat, float w)

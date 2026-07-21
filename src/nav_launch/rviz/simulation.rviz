@@ -367,17 +367,13 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        mppi_gpu: true
-        push_diag: true
-        samples_gpu: true
-        state: true
-        virtual_mppi: true
+        mppi: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /mppi_gpu_visualization
+        Value: /mppi_visualization
       Value: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
@@ -451,16 +447,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.4153449535369873
+      Distance: 3.2038869857788086
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 1.1192173957824707
-        Y: -0.6178131699562073
-        Z: 2.274817705154419
+        X: 0.3181450664997101
+        Y: 1.9518400430679321
+        Z: 2.2760112285614014
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
@@ -469,7 +465,7 @@ Visualization Manager:
       Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.8758442401885986
+      Yaw: 3.9108450412750244
     Saved: ~
 Window Geometry:
   Displays:

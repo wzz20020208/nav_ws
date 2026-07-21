@@ -55,6 +55,10 @@ __global__ void cost_eval_kernel(
   float total = 0.0f;
   float x = 0.0f, y = 0.0f;
 
+  // 预计算路径切线方向 (前瞻点处), 供越界检测
+  float cos_tan = cosf(path.path_tangent);
+  float sin_tan = sinf(path.path_tangent);
+
   for (int t = 0; t < H; ++t) {
     int idx = s * H + t;
 
@@ -70,6 +74,14 @@ __global__ void cost_eval_kernel(
 
     total += mgr.evaluate(x, y, cos_t, sin_t, theta, vx, vy, omega,
                           cmap, fp, path, goal);
+
+    // ── 前瞻点越界惩罚 (安全网: rollout 层已将到达后的 vx/vy 置零) ──
+    float dx_lh = x - goal.lookahead_x;
+    float dy_lh = y - goal.lookahead_y;
+    float along = dx_lh * cos_tan + dy_lh * sin_tan;  // 沿路径方向的越界距离
+    if (along > 0.0f) {
+      total += goal.lookahead_overshoot_weight * along * along;
+    }
   }
 
   // ── 终点距离代价 (1:1 THEMIS: 加到 prog_acc, 权重由 speed_ratio 统一处理) ──

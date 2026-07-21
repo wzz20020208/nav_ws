@@ -111,7 +111,7 @@ public:
   {
     (void)x; (void)y;
 
-    float err = sym_angle_diff(theta, path.path_tangent);
+    float err = normalize_angle(theta - path.path_tangent);  // 非对称, 区分前后
     return 4.0f * err * err;
   }
 };
@@ -211,7 +211,7 @@ public:
   {
     // 默认注册 3 个子类, 均启用
     subs_[0] = { pathAlignFn,      true, 1.0f };   // 路径对准
-    subs_[1] = { pathAngleFn,      true, 0.5f };   // 朝向对齐 (权重稍低, 由路径对准主导)
+    subs_[1] = { pathAngleFn,      true, 2.0f };   // 朝向对齐 (区分前后)
     subs_[2] = { pathDeviationFn,  true, 0.3f };   // 走廊偏离 (软墙, 辅助)
     count_ = 3;
   }

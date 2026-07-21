@@ -31,6 +31,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include "nav2_util/node_utils.hpp"
 
 namespace nav2_custom_plugins_v2
@@ -86,9 +88,7 @@ void MPPISteeringController::configure(
   vel_postprocessor_  = std::make_unique<VelocityPostProcessor>(params_);
   base_seq_.resize(H);
   vis_pub_.init(node.get());  // LifecycleNode* → LifecycleNode*
-  steering_pub_ = node->create_publisher<msg::VelocitySteering>(
-      "/cmd_vel_steering", 10);
-  cmd_vel_pub_ = node->create_publisher<geometry_msgs::msg::TwistStamped>(
+  twist_pub_ = node->create_publisher<geometry_msgs::msg::Twist>(
       "/cmd_vel_mppi", 10);
 
   RCLCPP_INFO(node->get_logger(),
@@ -107,8 +107,7 @@ void MPPISteeringController::cleanup()
   noise_gen_.reset();
   gpu_uploader_.reset();
   gpu_engine_.reset();
-  cmd_vel_pub_.reset();
-  steering_pub_.reset();
+  twist_pub_.reset();
 }
 
 void MPPISteeringController::activate()   {}
@@ -119,6 +118,7 @@ void MPPISteeringController::setPlan(const nav_msgs::msg::Path &path)
   global_plan_ = path;
   path_mgr_.setPath(path);
   state_machine_.reset();
+  in_terminal_align_ = false;
 }
 
 void MPPISteeringController::setSpeedLimit(const double &, const bool &) {}
@@ -136,12 +136,12 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   if (global_plan_.poses.empty()) {
     geometry_msgs::msg::TwistStamped cmd;
     cmd.header.frame_id = params_.use_global_mode ? "odom" : "BASE_LINK";
-    cmd.header.stamp = node_.lock()->now();
+    cmd.header.stamp = pose.header.stamp;
     if (params_.use_global_mode) {
       double yaw = 2.0 * atan2(pose.pose.orientation.z, pose.pose.orientation.w);
       cmd.twist.angular.z = yaw;  // global: angular.z = 目标朝向, 保持当前不转
     }
-    cmd_vel_pub_->publish(cmd);
+    twist_pub_->publish(cmd.twist);
     return cmd;
   }
 
@@ -164,7 +164,7 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
 
   if (path_mgr_.valid()) {
     int closest = path_mgr_.findClosestIndex(start.x, start.y);
-    lp = path_mgr_.computeLookahead(closest, params_.min_lookahead_dist);
+    lp = path_mgr_.computeLookahead(closest, params_.min_lookahead_dist, start.x, start.y);
 
     // yaw 来源切换
     lookahead_yaw = params_.use_planner_yaw
@@ -184,6 +184,11 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
     double dir_to_lh = std::atan2(lp.wy - start.y, lp.wx - start.x);
     path_mgr_.buildGoalInfo(goal_info, dir_to_lh - yaw);
 
+    // ── 前瞻点数据: kernel 越界惩罚 + rollout 到达检测 ──
+    goal_info.lookahead_x   = static_cast<float>(lp.wx);
+    goal_info.lookahead_y   = static_cast<float>(lp.wy);
+    goal_info.lookahead_overshoot_weight = static_cast<float>(params_.lookahead_overshoot_weight);
+
     // 前瞻点到终点距离
     double dx = goal_info.goal_x - lp.wx;
     double dy = goal_info.goal_y - lp.wy;
@@ -196,12 +201,28 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
         yaw, lookahead_yaw, dist_lh_to_goal, params_);
     if (dec.rotate_in_place) {
       // 跳过 MPPI: 直接输出原地旋转指令, 返回
+      if (params_.enable_file_log) {
+        std::ofstream flog(params_.log_file_path, std::ios::app);
+        flog << std::fixed << std::setprecision(4)
+             << "rotate: yaw=" << yaw << " lh_yaw=" << lookahead_yaw
+             << " err=" << (lookahead_yaw - yaw)
+             << " dist2goal=" << dist_lh_to_goal
+             << " target=" << dec.omega << " sign=" << dec.omega_sign
+             << std::endl;
+      }
       geometry_msgs::msg::TwistStamped cmd;
       cmd.header.frame_id = params_.use_global_mode ? "odom" : "BASE_LINK";
-      cmd.header.stamp = node_.lock()->now();
+      cmd.header.stamp = pose.header.stamp;
       cmd.twist.linear.x = 0.0;
       cmd.twist.linear.y = 0.0;
-      cmd.twist.angular.z = dec.omega_sign * params_.max_w;  // 原地旋转, omega=±max_w
+      // global: 目标角度 wrap 到 [0, 2π); base_link: 角速度 ±max_w
+      if (params_.use_global_mode) {
+        cmd.twist.angular.z = std::fmod(dec.omega, 2.0 * M_PI);
+        if (cmd.twist.angular.z < 0.0) cmd.twist.angular.z += 2.0 * M_PI;
+      } else {
+        cmd.twist.angular.z = dec.omega_sign * params_.max_w;
+      }
+      twist_pub_->publish(cmd.twist);
       return cmd;
     }
   }
@@ -247,6 +268,63 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   float min_cost = *min_it;
   int best_idx = static_cast<int>(std::distance(costs.begin(), min_it));
 
+  // ── debug: CPU 侧计算 best 轨迹 step0 的各代价分量, 写入 log 文件 ──
+  if (params_.enable_file_log) {
+    int i0 = best_idx * H;
+    float bx = batch.x[i0], by = batch.y[i0], bth = batch.theta[i0];
+    float bvx = batch.vx[i0], bvy = batch.vy[i0], bomg = batch.omega[i0];
+
+    // path_angle: normalize_angle(theta - path_tangent)
+    float angle_err = bth - static_cast<float>(lookahead_yaw);
+    while (angle_err > M_PI)  angle_err -= 2.0f * M_PI;
+    while (angle_err < -M_PI) angle_err += 2.0f * M_PI;
+    float angle_raw = 4.0f * angle_err * angle_err;
+    float angle_w  = 0.30f * 2.0f * angle_raw;  // cat_w × sub_w × raw
+
+    // path_align: min distance to path (simplified: dist to lookahead point)
+    float dx_lh = bx - static_cast<float>(lp.wx);
+    float dy_lh = by - static_cast<float>(lp.wy);
+    float align_raw = dx_lh * dx_lh + dy_lh * dy_lh;
+    float align_w  = 0.30f * 1.0f * align_raw;
+
+    // speed: 1:1 THEMIS — 对齐奖励 + 侧向重罚
+    float spd = hypotf(bvx, bvy);
+    float speed_raw, speed_w;
+    if (spd < 0.02f) {
+      speed_raw = 0.0f; speed_w = 0.0f;
+    } else {
+      float alignment = (bvx * goal_info.target_vx_r + bvy * goal_info.target_vy_r) / spd;
+      float lateral   = fabsf(bvx * goal_info.target_vy_r - bvy * goal_info.target_vx_r) / spd;
+      if (alignment < 0.0f) {
+        speed_raw = spd * 5.0f;
+      } else {
+        speed_raw = -spd * alignment + 2.0f * spd * lateral;
+      }
+      speed_w = 0.10f * 1.0f * speed_raw;
+    }
+
+    // obstacle: simplified — sample costmap at best trajectory step0 position
+    auto *cm = costmap_ros_->getCostmap();
+    unsigned char cost_val = cm->getCost(
+        static_cast<unsigned int>((bx - cm->getOriginX()) / cm->getResolution()),
+        static_cast<unsigned int>((by - cm->getOriginY()) / cm->getResolution()));
+    float obst_raw = cost_val / 255.0f;
+    float obst_w = 0.55f * 1.0f * obst_raw;
+
+    std::ofstream flog(params_.log_file_path, std::ios::app);
+    flog << std::fixed << std::setprecision(4)
+         << "cost: total=" << min_cost
+         << " | angle=" << angle_raw << "(w=" << angle_w << ")"
+         << " align=" << align_raw << "(w=" << align_w << ")"
+         << " speed=" << speed_raw << "(w=" << speed_w << ")"
+         << " obst=" << obst_raw << "(w=" << obst_w << ")"
+         << " | yaw=" << yaw << " lh_yaw=" << lookahead_yaw
+         << " err=" << angle_err
+         << " dist2goal=" << dist_lh_to_goal
+         << " vx=" << bvx << " vy=" << bvy << " omg=" << bomg
+         << std::endl;
+  }
+
   // ── ⑩ GPU 加权 ──
   auto result = pipeline_->launchWeightedSum(min_cost,
       static_cast<float>(params_.lambda), N, H, stream);
@@ -256,12 +334,72 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   // ── ⑪ 控制量后处理: 提取 + clamp + (δ→ω 或 TF 旋转) ──
   auto proc = vel_postprocessor_->process(result, yaw, params_.use_global_mode);
 
+  // ── global 模式: 目标角度直接发前瞻点推荐朝向, 不走 MPPI omega*dt 增量 ──
+  if (params_.use_global_mode) {
+    proc.omega_out = std::fmod(lookahead_yaw, 2.0 * M_PI);
+    if (proc.omega_out < 0.0) proc.omega_out += 2.0 * M_PI;
+  }
+
+  // ── 前瞻点距离减速 (后处理, vx/vy 线性缩放, omega 不受影响) ──
+  // 1:1 THEMIS: scale = kp + (1-kp) × min(1.0, dist/decel_dist)
+  {
+    double dist_to_lh = std::hypot(lp.wx - start.x, lp.wy - start.y);
+    if (dist_to_lh < params_.lookahead_decel_dist) {
+      double ratio = dist_to_lh / params_.lookahead_decel_dist;
+      double scale = params_.lookahead_kp + (1.0 - params_.lookahead_kp) * ratio;
+      proc.control.vx *= scale;
+      proc.control.vy *= scale;
+      proc.vx_out    *= scale;
+      proc.vy_out    *= scale;
+    }
+  }
+
+  // ── 终端朝向: 迟滞进入/退出, 直接发 goal_yaw 不通过 MPPI ──
+  {
+    double dist_to_final = std::hypot(goal_info.goal_x - start.x, goal_info.goal_y - start.y);
+    double angle_err = path_info.goal_yaw - static_cast<float>(yaw);
+    while (angle_err > M_PI)  angle_err -= 2.0 * M_PI;
+    while (angle_err < -M_PI) angle_err += 2.0 * M_PI;
+
+    // 进入条件
+    if (!in_terminal_align_ && dist_to_final < params_.terminal_angle_dist
+        && std::abs(angle_err) > params_.terminal_angle_tolerance) {
+      in_terminal_align_ = true;
+    }
+    // 退出条件: 对齐完成 或 距离超迟滞边界
+    if (in_terminal_align_) {
+      if (std::abs(angle_err) <= params_.terminal_angle_tolerance ||
+          dist_to_final > params_.terminal_angle_dist * 2.0) {
+        in_terminal_align_ = false;
+      }
+    }
+    // 终端对齐模式下直接发 goal_yaw
+    if (in_terminal_align_ && params_.use_global_mode) {
+      proc.omega_out = std::fmod(path_info.goal_yaw, 2.0 * M_PI);
+      if (proc.omega_out < 0.0) proc.omega_out += 2.0 * M_PI;
+    }
+  }
+
+  // ── debug: 输出实际 omega vs MPPI 采样 omega ──
+  if (params_.enable_file_log) {
+    std::ofstream flog(params_.log_file_path, std::ios::app);
+    flog << std::fixed << std::setprecision(4)
+         << "output: ctrl_omg=" << proc.control.omega
+         << " out_omg=" << proc.omega_out
+         << " ctrl_vx=" << proc.control.vx
+         << " ctrl_vy=" << proc.control.vy
+         << " global=" << params_.use_global_mode
+         << std::endl;
+  }
+
   // ── vis: 发布 RViz markers ──
   Control vis_cmd = proc.control;
-  vis_cmd.vx = proc.vx_out;  // odom 系 (已旋转)
-  vis_cmd.vy = proc.vy_out;
+  vis_cmd.vx    = proc.vx_out;  // global=odom 系, base_link=body 系
+  vis_cmd.vy    = proc.vy_out;
+  vis_cmd.omega = proc.omega_out;  // global=目标角度, base_link=角速度
   vis_pub_.publish(start, lp, batch, costs, best_idx, N, H,
-                   vis_cmd, params_.use_global_mode);
+                   vis_cmd, params_.use_global_mode,
+                   "odom");
 
   // ── ⑫ 更新 warm-start 基序列 (始终 body 系) ──
   base_seq_.shiftAndDecay(0.5);
@@ -273,23 +411,13 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   // ── ⑬ 填充 TwistStamped ──
   geometry_msgs::msg::TwistStamped cmd;
   cmd.header.frame_id = params_.use_global_mode ? "odom" : "BASE_LINK";
-  cmd.header.stamp = node_.lock()->now();
+  cmd.header.stamp = pose.header.stamp;
   cmd.twist.linear.x  = proc.vx_out;
   cmd.twist.linear.y  = proc.vy_out;
-  // global 模式: omega_out (已转 odom 系); base_link 模式: omega
+  // global: omega_out=目标角度; base_link: omega_out=角速度
   cmd.twist.angular.z = proc.omega_out;
 
-  // 发布到独立话题, 与 Nav2 /cmd_vel 隔离
-  cmd_vel_pub_->publish(cmd);
-
-  // 同时发布自定义 VelocitySteering 消息
-  if (steering_pub_) {
-    msg::VelocitySteering vs;
-    vs.vx = proc.control.vx;
-    vs.vy = proc.control.vy;
-    vs.steering_angle = proc.control.omega;
-    steering_pub_->publish(vs);
-  }
+  twist_pub_->publish(cmd.twist);
 
   return cmd;
 }

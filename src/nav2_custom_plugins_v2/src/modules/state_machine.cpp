@@ -45,19 +45,22 @@ HeadingDecision StateMachine::evaluateHeading(
     } else {
       // 继续旋转
       dec.rotate_in_place = true;
-      dec.omega = lookahead_yaw;
+      dec.omega = current_yaw + err;
+      if (dec.omega > M_PI)       dec.omega -= 2.0 * M_PI;
+      else if (dec.omega < -M_PI) dec.omega += 2.0 * M_PI;
       dec.omega_sign = (err > 0) ? 1.0 : -1.0;
     }
     return dec;
   }
 
   // ── 候选判定: 首次进入 ──
-  // 条件: 偏差超阈值 AND 前瞻点离终点 ≥ 0.5m (避免干扰终端对准)
-  if (std::abs(err) > params.heading_misalign_threshold &&
-      dist_lh_to_goal >= 0.5)
+  // 偏差超阈值即触发, 直接发前瞻点推荐朝向
+  if (std::abs(err) > params.heading_misalign_threshold)
   {
     dec.rotate_in_place = true;
-    dec.omega = lookahead_yaw;
+    dec.omega = current_yaw + err;
+    if (dec.omega > M_PI)       dec.omega -= 2.0 * M_PI;
+    else if (dec.omega < -M_PI) dec.omega += 2.0 * M_PI;
     dec.omega_sign = (err > 0) ? 1.0 : -1.0;
     rotating_ = true;
   }

@@ -41,11 +41,12 @@ void NoiseGenerator::generate(int N, int H, double path_yaw, double current_yaw)
   float heading_err = static_cast<float>(path_yaw - current_yaw);
   while (heading_err > M_PI)  heading_err -= 2.0f * M_PI;
   while (heading_err < -M_PI) heading_err += 2.0f * M_PI;
+  const float omega_bias = 0.5f * heading_err;  // 偏差→纠正偏置
 
   for (int i = 0; i < total; ++i) {
     noise_vx_[i] = gauss(rng) * p_.action_std_v + bias_vx;
     noise_vy_[i] = gauss(rng) * p_.action_std_vy + bias_vy;
-    noise_w_[i]  = gauss(rng) * p_.action_std_w;
+    noise_w_[i]  = gauss(rng) * p_.action_std_w + omega_bias;
   }
 }
 

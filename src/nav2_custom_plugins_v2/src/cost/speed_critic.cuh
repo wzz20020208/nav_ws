@@ -76,13 +76,18 @@ public:
 class SpeedRewardCritic : public SpeedCritic
 {
 public:
-  /// 1:1 THEMIS compute_speed_reward — 使用前瞻点方向
+  /// speed reward: 1:1 THEMIS — 对齐奖励, 侧向重罚, 反向重罚
+  ///   alignment = cos(err), lateral = |sin(err)|
+  ///   return -speed × alignment + 2.0 × speed × lateral
+  ///   0° → -speed (奖励),  26.6° → 0 (中性),  45° → +0.71×speed (惩罚)
   __device__ float compute(float vx, float vy, const GoalInfo &goal) const
   {
     float speed = hypotf(vx, vy);
-    float dot = (vx * goal.target_vx_r + vy * goal.target_vy_r);
-    float vel_err = 1.0f - dot / fmaxf(speed, 1e-6f);
-    return vel_err * vel_err;
+    if (speed < 0.02f) return 0.0f;  // 停止中性
+    float alignment = (vx * goal.target_vx_r + vy * goal.target_vy_r) / speed;  // cos(err)
+    float lateral = fabsf(vx * goal.target_vy_r - vy * goal.target_vx_r) / speed; // |sin(err)|
+    if (alignment < 0.0f) return speed * 5.0f;  // 反向 (>90°): 重罚
+    return -speed * alignment + 2.0f * speed * lateral;  // 对齐奖励 + 侧向抑制
   }
 };
 

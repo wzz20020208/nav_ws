@@ -44,6 +44,9 @@ struct GoalInfo {
   float target_vy_r = 0.0f;      ///< 期望速度 y 分量 (机器人坐标系)
   float goal_x = 0.0f;           ///< 终点世界坐标 x, 供 TerminalDistCritic
   float goal_y = 0.0f;           ///< 终点世界坐标 y
+  float lookahead_x = 0.0f;      ///< 前瞻点世界坐标 x, 供 kernel overshoot 检测
+  float lookahead_y = 0.0f;      ///< 前瞻点世界坐标 y
+  float lookahead_overshoot_weight = 5.0f; ///< 越界惩罚系数 (× overshoot²)
 };
 
 namespace nav2_custom_plugins_v2 {
@@ -82,7 +85,13 @@ struct MPPIParams {
 
   // 前瞻
   double min_lookahead_dist = 0.8;
+  double lookahead_kp = 0.3;           ///< 前瞻减速最低比例 (0=完全停止, 1=不减速)
   double lookahead_decel_dist = 0.5;
+  double lookahead_overshoot_weight = 5.0;  ///< 前瞻点越界惩罚系数
+
+  // 终端朝向: 距终点此距离内直接发 goal_yaw 为目标角度
+  double terminal_angle_dist = 0.3;      ///< 触发距离 (m)
+  double terminal_angle_tolerance = 0.17;///< 对准容差 (rad)
 
   // EMA
   bool enable_ema = false;
@@ -133,8 +142,12 @@ inline constexpr DblParam kDblParams[] = {
   {"footprint_back",     &MPPIParams::footprint_back},
   {"footprint_left",     &MPPIParams::footprint_left},
   {"footprint_right",    &MPPIParams::footprint_right},
-  {"min_lookahead_dist", &MPPIParams::min_lookahead_dist},
-  {"lookahead_decel_dist",&MPPIParams::lookahead_decel_dist},
+  {"min_lookahead_dist",          &MPPIParams::min_lookahead_dist},
+  {"lookahead_kp",               &MPPIParams::lookahead_kp},
+  {"lookahead_decel_dist",       &MPPIParams::lookahead_decel_dist},
+  {"lookahead_overshoot_weight", &MPPIParams::lookahead_overshoot_weight},
+  {"terminal_angle_dist",      &MPPIParams::terminal_angle_dist},
+  {"terminal_angle_tolerance", &MPPIParams::terminal_angle_tolerance},
   {"ema_alpha",          &MPPIParams::ema_alpha},
 };
 
@@ -232,13 +245,14 @@ struct BatchTrajectories {
   std::vector<float> omega;       // [N×H] 实际采用的控制量 omega
 };
 
-/// 运动学积分: 位置全局系直接累加, 朝向角速度积分
+/// 运动学积分: vx/vy 为 body 系 (前/左), 需旋转变换到世界系
 inline RobotState kinematic_integrate(
     const RobotState &state, const Control &u, double dt, double max_w)
 {
   RobotState next = state;
-  next.x += u.vx * dt;
-  next.y += u.vy * dt;
+  double c = std::cos(state.theta), s = std::sin(state.theta);
+  next.x += (u.vx * c - u.vy * s) * dt;
+  next.y += (u.vx * s + u.vy * c) * dt;
   next.theta += std::clamp(u.omega, -max_w, max_w) * dt;
   return next;
 }
