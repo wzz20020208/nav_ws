@@ -64,3 +64,33 @@ setPlan(path) → path_mgr_.setPath, state_machine_.reset
 - GPU 上禁用虚函数，用函数指针注册表实现多态
 - 每个功能模块独立文件，controller 只做编排
 - 每次修改后 git commit
+
+## 修改记录 (2026-07-24)
+
+### BaseSimilarityCritic — 时序一致性正则
+
+新增 SPEED 大类子代价，对每条采样轨迹每步控制量 `(vx, vy, omega)` 与 warm-start base 序列求欧氏距离平方：
+```
+cost = (vx - base_vx[t])² + (vy - base_vy[t])² + (ω - base_ω[t])²
+```
+约束相邻帧最优序列不跳变，解决 vy 帧间横跳。
+
+### SpeedRewardCritic 改进
+
+1. **lateral 系数 2.0 → 6.0**: 中性点从 26.6° 缩到 9.5°，偏离前瞻点惩罚大幅增强
+2. **奖励速度 cap**: `reward_speed = min(speed, max_feasible_v)`, max_feasible_v 由 `max_v/max_vy` 矩形包络在该方向的可达速度自动算出。超速无额外甜头，速度自然稳在可行范围
+3. **GoalInfo 加 max_feasible_v**: PathManager::buildGoalInfo 自动计算
+
+### Bug 修复: uploadBase double→float
+
+`MPPIPipeline::uploadBase` 原来将 `std::vector<double>` 直接以 `const double*` 上传到 GPU 的 `float*` buffer (H×4 字节 vs H×8 字节)，GPU 读到随机位模式 → NaN/Inf → 代价链污染 → total=nan → weighted sum 输出垃圾 → base_seq 被腐蚀 → H 帧后恢复正常。现已修复为 float 转换后再上传。
+
+### 参数调整
+
+| 参数 | 旧 | 新 | 原因 |
+|------|-----|-----|------|
+| lateral 系数 | 2.0 | 6.0 | 压窄偏离容忍 |
+| speed_ratio | 0.10 | 0.15 | 速度代价声音更大 |
+| base_similarity_weight | - | 0.5 | 帧间一致性 |
+| action_std_v | 0.5 | 0.2 | 降低纵向探索噪声 |
+| action_std_vy | 0.5 | 0.1 | 降低侧向探索噪声 |
