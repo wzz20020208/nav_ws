@@ -59,6 +59,10 @@ public:
   /// 设置全局路径 (每帧由 Nav2 setPlan 回调 → 此处存储)
   void setPath(const nav_msgs::msg::Path &path);
 
+  /// 刷新路径坐标 (重定位后 map→odom 会变, 每帧用最新 tf 更新)
+  /// 仅替换 plan_ 内容, 不重置 prev_closest_idx_
+  void refreshTransform(const nav_msgs::msg::Path &transformed);
+
   /// 路径是否有效
   bool valid() const { return !plan_.poses.empty(); }
   int  numPoints() const { return static_cast<int>(plan_.poses.size()); }
@@ -95,8 +99,9 @@ public:
   /// 填充 PathInfo (不含 GPU 指针, 由调用者上传后再填)
   void buildPathInfo(PathInfo &info, double path_tangent) const;
 
-  /// 填充 GoalInfo
-  void buildGoalInfo(GoalInfo &info, double target_yaw) const;
+  /// 填充 GoalInfo (target_yaw=body系期望方向, max_v/max_vy=矩形速度包络)
+  void buildGoalInfo(GoalInfo &info, double target_yaw,
+                     double max_v, double max_vy) const;
 
   /// 提取整条路径的 (x, y) 浮点数组 (供 GPU 上传)
   void extractPathArrays(std::vector<float> &xs, std::vector<float> &ys) const;

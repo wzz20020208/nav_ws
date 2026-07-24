@@ -32,29 +32,37 @@ __global__ void test_evaluate_kernel(
     float *d_results)            // [5] 输出
 {
   CriticManager mgr;
-  mgr.init();
+  CriticParams critic_params;
+  critic_params.obstacle_ratio = 0.60f;
+  critic_params.tracking_ratio = 0.30f;
+  critic_params.speed_ratio    = 0.10f;
+  mgr.init(critic_params);
 
   float cos_t = 1.0f, sin_t = 0.0f, theta = 0.0f, delta = 0.0f;
 
   // ── 测试 1: 空旷地图, 原点 ──
   d_results[0] = mgr.evaluate(
       0.0f, 0.0f, cos_t, sin_t, theta, 0.3f, 0.0f, delta,
-      cmap, fp, path, goal);
+      cmap, fp, path, goal,
+      0, nullptr, nullptr, nullptr);
 
   // ── 测试 2: 同位置 ──
   d_results[1] = mgr.evaluate(
       0.0f, 0.0f, cos_t, sin_t, theta, 0.3f, 0.0f, delta,
-      cmap, fp, path, goal);
+      cmap, fp, path, goal,
+      0, nullptr, nullptr, nullptr);
 
   // ── 测试 3: 轨迹点在路径上 ──
   d_results[2] = mgr.evaluate(
       0.5f, 0.0f, cos_t, sin_t, theta, 0.3f, 0.0f, delta,
-      cmap, fp, path, goal);
+      cmap, fp, path, goal,
+      0, nullptr, nullptr, nullptr);
 
   // ── 测试 4: 速度方向与目标一致 ──
   d_results[3] = mgr.evaluate(
       0.0f, 0.0f, cos_t, sin_t, theta, 1.0f, 0.0f, delta,
-      cmap, fp, path, goal);
+      cmap, fp, path, goal,
+      0, nullptr, nullptr, nullptr);
 
   // ── 测试 5: 多步累加 + horizon 归一化 (/5) ──
   float multi = 0.0f;
@@ -65,7 +73,8 @@ __global__ void test_evaluate_kernel(
     multi += mgr.evaluate(
         positions[t][0], positions[t][1],
         cos_t, sin_t, theta, 0.3f, 0.0f, delta,
-        cmap, fp, path, goal);
+        cmap, fp, path, goal,
+      0, nullptr, nullptr, nullptr);
   }
   d_results[4] = multi / 5.0f;
 }

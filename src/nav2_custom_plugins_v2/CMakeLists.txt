@@ -39,6 +39,7 @@ add_library(${PROJECT_NAME}_gpu SHARED
   src/gpu/gpu_engine.cpp
   src/gpu/gpu_uploader.cpp
   src/gpu/mppi_gpu_kernels.cu
+  src/modules/param_loader.cpp
   src/modules/path_manager.cpp
   src/modules/velocity_postprocessor.cpp
   src/modules/state_machine.cpp

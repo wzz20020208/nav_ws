@@ -8,7 +8,7 @@
  *
  *   ① pipeline.uploadBase(base_seq, H, stream)     ← warm-start 基线
  *   ② pipeline.uploadRollout(batch, N, H, stream)   ← N 条轨迹
- *   ③ engine.launchSampleAndCost(...)                ← GPU 代价评估 (后续)
+ *   ③ engine.launchCostKernel(...)                   ← GPU 代价评估 (后续)
  *   ④ engine.download("costs", ...)                  ← 下载代价
  *   ⑤ cudaStreamSynchronize(stream)                  ← 等 GPU 完成
  *   ⑥ CPU 扫 costs 找 min_cost
@@ -39,7 +39,7 @@ MPPIPipeline::MPPIPipeline(GPUEngine &engine, GPUUploader &uploader,
 // uploadRollout — 将 N 条轨迹的位姿 + 控制量批量上传到 GPU
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// 上传 BatchTrajectories 的 5 个展平数组 → GPU 对应 buffer:
+// 上传 BatchTrajectories 的 6 个展平数组 → GPU 对应 buffer:
 //   x     → buf::traj_x        轨迹点全局 x 坐标 [N×H], 碰撞检测 + 路径偏离代价
 //   y     → buf::traj_y        轨迹点全局 y 坐标 [N×H], 同上
 //   vx    → buf::sampled_vx    实际控制量 vx [N×H], 速度代价项
@@ -96,13 +96,24 @@ void MPPIPipeline::uploadRollout(const BatchTrajectories &traj,
 void MPPIPipeline::uploadBase(const ControlSequence &base, int H,
                                cudaStream_t stream)
 {
-  const struct { const char *name; const double *data; } map[] = {
-    {buf::base_vx,    base.vx.data()},
-    {buf::base_vy,    base.vy.data()},
-    {buf::base_w, base.omega.data()},
+  // double → float: GPU buffer 是 float, base.vx/vy/omega 是 std::vector<double>
+  // 必须先转换, 否则 double 的 8 字节被当成 float 读 → 随机位模式 → NaN/Inf
+  if (static_cast<int>(float_fbuf_.size()) < H) {
+    float_fbuf_.resize(H);
+    float_fbuf2_.resize(H);
+    float_fbuf3_.resize(H);
+  }
+  for (int i = 0; i < H; ++i) {
+    float_fbuf_[i] = static_cast<float>(base.vx[i]);
+    float_fbuf2_[i] = static_cast<float>(base.vy[i]);
+    float_fbuf3_[i] = static_cast<float>(base.omega[i]);
+  }
+  const struct { const char *name; const float *data; } map[] = {
+    {buf::base_vx,    float_fbuf_.data()},
+    {buf::base_vy,    float_fbuf2_.data()},
+    {buf::base_w, float_fbuf3_.data()},
   };
   for (auto &e : map) engine_.upload(e.name, e.data, stream);
-  (void)H;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -117,9 +128,10 @@ void MPPIPipeline::uploadBase(const ControlSequence &base, int H,
 std::vector<float> MPPIPipeline::launchCost(
     const CostmapInfo &cmap, const Footprint &fp,
     const PathInfo &path, const GoalInfo &goal,
+    const CriticParams &critic_params,
     int N, int H, cudaStream_t stream)
 {
-  engine_.launchCostKernel(cmap, fp, path, goal,
+  engine_.launchCostKernel(cmap, fp, path, goal, critic_params,
       static_cast<float>(params_.cost_scale), N, H, stream);
 
   std::vector<float> costs(N);

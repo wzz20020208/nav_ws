@@ -12,7 +12,7 @@
  *
  *   ObstacleCategory                  ← 容器: 持有注册表 subs_[], 管理子类调度
  *     subs_[i] = { fn, enabled, weight }  每个槽位绑定一个代价函数 + 元数据
- *     evaluate()                         遍历 subs_ → 直接调 fn → 加权平均
+ *     evaluate()                         遍历 subs_ → 直接调 fn → 加权和
  *
  * ═══════════════════════════════════════════════════════════════════════════════
  * 完整调用链 (从 GPU kernel 到实际计算)
@@ -25,7 +25,7 @@
  *               → FootprintCritic::compute(x,y,cos_t,sin_t,vx,cmap,fp)
  *                   → 足迹网格采样 → costmap 双线性插值 → 四次方碰撞惩罚
  *             total += subs_[i].weight × result
- *           return total / active_count                    ← 大类内平均
+ *           return total                                    ← 加权和
  *
  * ═══════════════════════════════════════════════════════════════════════════════
  * 新增子类的步骤 (以 DistanceFieldCritic 为例)
@@ -214,7 +214,7 @@ public:
   //
   // 示例: subs_[0] = { footprintFn, true, 1.0f }
   //        subs_[1] = { distanceFn,  true, 0.4f }
-  //        → OBSTACLE 总分 = (1.0*fn0 + 0.4*fn1) / 2
+  //        → OBSTACLE 总分 = 1.0*fn0 + 0.4*fn1  (加权和)
 
   struct SubEntry
   {
@@ -279,9 +279,9 @@ public:
   // evaluate — 大类求值入口
   // ═════════════════════════════════════════════════════════════════════════
   //
-  /// 遍历注册表中所有启用的子类 → 调函数指针 → 加权平均
+  /// 遍历注册表中所有启用的子类 → 调函数指针 → 加权和
   ///
-  /// 公式: result = Σ_i (weight[i] × subs_[i].fn(...)) / active_count
+  /// 公式: result = Σ_i (weight[i] × subs_[i].fn(...))
   ///
   /// 调用频率极高 (N×H×10Hz), 设计上追求:
   ///   - 循环体简洁 (一次函数指针调用 + 一次乘加)
@@ -301,7 +301,7 @@ public:
       const CostmapInfo &cmap, const Footprint &fp) const
   {
     float total = 0.0f;   // 加权代价累加: Σ (weight × compute_result)
-    int active = 0;       // 启用的子类计数, 用于最后平均
+    int active = 0;       // 启用的子类计数 (当前仅用于跳过 disabled 条目)
 
     for (int i = 0; i < count_; ++i) {
       const SubEntry &e = subs_[i];
@@ -312,8 +312,7 @@ public:
       active++;
     }
 
-    // 大类内平均: 保证子类数量不影响跨大类权重平衡
-    // active=0 (无启用子类) 返回 0, 不贡献代价
+    // 大类内加权和 (不平均), active=0 时返回 0
     return total;  // THEMIS: weighted sum
   }
 

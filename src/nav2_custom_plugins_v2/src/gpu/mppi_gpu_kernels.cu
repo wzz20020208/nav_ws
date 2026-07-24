@@ -38,10 +38,14 @@ __global__ void cost_eval_kernel(
     const float *__restrict__ sampled_vx,    // [N×H]
     const float *__restrict__ sampled_vy,    // [N×H]
     const float *__restrict__ sampled_omega, // [N×H]
+    const float *__restrict__ base_vx,       // [H] warm-start base
+    const float *__restrict__ base_vy,       // [H]
+    const float *__restrict__ base_omega,    // [H]
     const CostmapInfo cmap,
     const Footprint   fp,
     const PathInfo    path,
     const GoalInfo    goal,
+    const CriticParams critic_params,
     float cost_scale,
     int N, int H,
     float *__restrict__ d_costs)
@@ -50,7 +54,7 @@ __global__ void cost_eval_kernel(
   if (s >= N) return;
 
   CriticManager mgr;
-  mgr.init();
+  mgr.init(critic_params);
 
   float total = 0.0f;
   float x = 0.0f, y = 0.0f;
@@ -73,7 +77,8 @@ __global__ void cost_eval_kernel(
     float sin_t = sinf(theta);
 
     total += mgr.evaluate(x, y, cos_t, sin_t, theta, vx, vy, omega,
-                          cmap, fp, path, goal);
+                          cmap, fp, path, goal,
+                          t, base_vx, base_vy, base_omega);
 
     // ── 前瞻点越界惩罚 (安全网: rollout 层已将到达后的 vx/vy 置零) ──
     float dx_lh = x - goal.lookahead_x;
@@ -104,6 +109,7 @@ namespace nav2_custom_plugins_v2
 void GPUEngine::launchCostKernel(
     const CostmapInfo &cmap, const Footprint &fp,
     const PathInfo &path, const GoalInfo &goal,
+    const CriticParams &critic_params,
     float cost_scale, int N, int H, cudaStream_t stream)
 {
   auto *d_traj_x     = static_cast<const float *>(getDevicePtr(buf::traj_x));
@@ -112,13 +118,17 @@ void GPUEngine::launchCostKernel(
   auto *d_sampled_vx    = static_cast<const float *>(getDevicePtr(buf::sampled_vx));
   auto *d_sampled_vy    = static_cast<const float *>(getDevicePtr(buf::sampled_vy));
   auto *d_sampled_omega = static_cast<const float *>(getDevicePtr(buf::sampled_omega));
-  auto *d_costs         = static_cast<float *>(getDevicePtr(buf::costs));
+  auto *d_base_vx    = static_cast<const float *>(getDevicePtr(buf::base_vx));
+  auto *d_base_vy    = static_cast<const float *>(getDevicePtr(buf::base_vy));
+  auto *d_base_omega = static_cast<const float *>(getDevicePtr(buf::base_w));
+  auto *d_costs      = static_cast<float *>(getDevicePtr(buf::costs));
 
   int blocks = (N + 255) / 256;
   cost_eval_kernel<<<blocks, 256, 0, stream>>>(
       d_traj_x, d_traj_y, d_traj_theta,
       d_sampled_vx, d_sampled_vy, d_sampled_omega,
-      cmap, fp, path, goal, cost_scale, N, H, d_costs);
+      d_base_vx, d_base_vy, d_base_omega,
+      cmap, fp, path, goal, critic_params, cost_scale, N, H, d_costs);
 
   cudaError_t e = cudaGetLastError();
   if (e != cudaSuccess) {

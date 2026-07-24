@@ -27,6 +27,7 @@
 
 #include "nav2_custom_plugins_v2/mppi_steering_controller.hpp"
 #include "nav2_custom_plugins_v2/pipeline/mppi_pipeline.hpp"
+#include "nav2_custom_plugins_v2/modules/param_loader.hpp"
 
 #include <stdexcept>
 #include <algorithm>
@@ -34,6 +35,8 @@
 #include <fstream>
 #include <iomanip>
 #include "nav2_util/node_utils.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 namespace nav2_custom_plugins_v2
 {
@@ -57,22 +60,8 @@ void MPPISteeringController::configure(
   if (!node) throw std::runtime_error("Node expired");
 
   // 读 YAML 参数 → MPPIParams
-  // 读 YAML 参数 — 循环公共表, 新增参数只需在 mppi_core.hpp 加一行
-  for (auto &p : kIntParams) {
-    nav2_util::declare_parameter_if_not_declared(
-        node.get(), plugin_name_ + "." + p.name, rclcpp::ParameterValue(params_.*p.ptr));
-    node->get_parameter(plugin_name_ + "." + p.name, params_.*p.ptr);
-  }
-  for (auto &p : kDblParams) {
-    nav2_util::declare_parameter_if_not_declared(
-        node.get(), plugin_name_ + "." + p.name, rclcpp::ParameterValue(params_.*p.ptr));
-    node->get_parameter(plugin_name_ + "." + p.name, params_.*p.ptr);
-  }
-  for (auto &p : kBoolParams) {
-    nav2_util::declare_parameter_if_not_declared(
-        node.get(), plugin_name_ + "." + p.name, rclcpp::ParameterValue(params_.*p.ptr));
-    node->get_parameter(plugin_name_ + "." + p.name, params_.*p.ptr);
-  }
+  ParamLoader loader;
+  loader.configure(node, plugin_name_, params_);
 
   const int N = params_.num_samples;
   const int H = params_.prediction_horizon;
@@ -155,6 +144,32 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   double yaw  = 2.0 * atan2(pose.pose.orientation.z, pose.pose.orientation.w);
   start.theta = yaw;
 
+  // ── ①b 每帧 tf 变换: 重定位后 map→odom 会变, 必须每帧用最新 tf 刷新路径坐标 ──
+  if (costmap_ros_ && tf_) {
+    std::string costmap_frame = costmap_ros_->getGlobalFrameID();
+    if (!global_plan_.poses.empty() && !global_plan_.header.frame_id.empty()
+        && global_plan_.header.frame_id != costmap_frame) {
+      try {
+        auto tf_stamped = tf_->lookupTransform(
+            costmap_frame, global_plan_.header.frame_id,
+            tf2::TimePointZero, tf2::durationFromSec(0.1));
+        nav_msgs::msg::Path transformed;
+        transformed.header.frame_id = costmap_frame;
+        transformed.header.stamp    = global_plan_.header.stamp;
+        transformed.poses.reserve(global_plan_.poses.size());
+        for (const auto &p : global_plan_.poses) {
+          geometry_msgs::msg::PoseStamped tp = p;
+          tf2::doTransform(p.pose, tp.pose, tf_stamped);
+          tp.header.frame_id = costmap_frame;
+          transformed.poses.push_back(tp);
+        }
+        path_mgr_.refreshTransform(transformed);
+      } catch (const std::exception &) {
+        // tf 查询失败时保持 path_mgr_ 当前状态, 不更新
+      }
+    }
+  }
+
   // ── ② PathManager: 最近点 → 前瞻点 → 推荐朝向 ──
   double lookahead_yaw = yaw;
   PathInfo path_info;
@@ -182,7 +197,8 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
 
     // target 方向 = 机器人→前瞻点, 转到机器人系 (与 vx/vy 同系)
     double dir_to_lh = std::atan2(lp.wy - start.y, lp.wx - start.x);
-    path_mgr_.buildGoalInfo(goal_info, dir_to_lh - yaw);
+    path_mgr_.buildGoalInfo(goal_info, dir_to_lh - yaw,
+                             params_.max_v, params_.max_vy);
 
     // ── 前瞻点数据: kernel 越界惩罚 + rollout 到达检测 ──
     goal_info.lookahead_x   = static_cast<float>(lp.wx);
@@ -223,6 +239,20 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
         cmd.twist.angular.z = dec.omega_sign * params_.max_w;
       }
       twist_pub_->publish(cmd.twist);
+
+      // ── vis: heading 模式下也发布前瞻点 + 机器人位姿, 跳过 MPPI 轨迹 ──
+      {
+        Control vis_cmd;
+        vis_cmd.vx = 0.0; vis_cmd.vy = 0.0;
+        vis_cmd.omega = (params_.use_global_mode)
+            ? static_cast<double>(cmd.twist.angular.z)
+            : dec.omega_sign * params_.max_w;
+        BatchTrajectories empty_batch;
+        std::vector<float> empty_costs;
+        vis_pub_.publish(start, lp, empty_batch, empty_costs, -1, N, H,
+                         vis_cmd, params_.use_global_mode, "odom", true);
+      }
+
       return cmd;
     }
   }
@@ -258,10 +288,12 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
   cmap.origin_x = cm->getOriginX();
   cmap.origin_y = cm->getOriginY();
 
-  Footprint fp;
+  Footprint fp = ParamLoader::buildFootprint(params_);
+  CriticParams critic_params = ParamLoader::buildCriticParams(params_);
 
   // ── ⑧ GPU 代价 ──
-  auto costs = pipeline_->launchCost(cmap, fp, path_info, goal_info, N, H, stream);
+  auto costs = pipeline_->launchCost(cmap, fp, path_info, goal_info,
+                                     critic_params, N, H, stream);
 
   // ── ⑨ 找 min + best_idx ──
   auto min_it = std::min_element(costs.begin(), costs.end());
@@ -279,28 +311,31 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
     while (angle_err > M_PI)  angle_err -= 2.0f * M_PI;
     while (angle_err < -M_PI) angle_err += 2.0f * M_PI;
     float angle_raw = 4.0f * angle_err * angle_err;
-    float angle_w  = 0.30f * 2.0f * angle_raw;  // cat_w × sub_w × raw
+    float angle_w  = critic_params.tracking_ratio * critic_params.path_angle_weight * angle_raw;
 
     // path_align: min distance to path (simplified: dist to lookahead point)
     float dx_lh = bx - static_cast<float>(lp.wx);
     float dy_lh = by - static_cast<float>(lp.wy);
     float align_raw = dx_lh * dx_lh + dy_lh * dy_lh;
-    float align_w  = 0.30f * 1.0f * align_raw;
+    float align_w  = critic_params.tracking_ratio * critic_params.path_align_weight * align_raw;
 
-    // speed: 1:1 THEMIS — 对齐奖励 + 侧向重罚
+    // speed: THEMIS — 对齐奖励 (reward_speed cap) + 侧向重罚 (×6)
     float spd = hypotf(bvx, bvy);
-    float speed_raw, speed_w;
+    float mfv = goal_info.max_feasible_v;
+    float speed_raw, speed_w, reward_spd, al, lt;
     if (spd < 0.02f) {
-      speed_raw = 0.0f; speed_w = 0.0f;
+      speed_raw = 0.0f; speed_w = 0.0f; reward_spd = 0.0f;
+      al = 1.0f; lt = 0.0f;
     } else {
-      float alignment = (bvx * goal_info.target_vx_r + bvy * goal_info.target_vy_r) / spd;
-      float lateral   = fabsf(bvx * goal_info.target_vy_r - bvy * goal_info.target_vx_r) / spd;
-      if (alignment < 0.0f) {
+      al  = (bvx * goal_info.target_vx_r + bvy * goal_info.target_vy_r) / spd;
+      lt  = fabsf(bvx * goal_info.target_vy_r - bvy * goal_info.target_vx_r) / spd;
+      reward_spd = fminf(spd, mfv);
+      if (al < 0.0f) {
         speed_raw = spd * 5.0f;
       } else {
-        speed_raw = -spd * alignment + 2.0f * spd * lateral;
+        speed_raw = -reward_spd * al + 6.0f * spd * lt;
       }
-      speed_w = 0.10f * 1.0f * speed_raw;
+      speed_w = critic_params.speed_ratio * critic_params.speed_reward_weight * speed_raw;
     }
 
     // obstacle: simplified — sample costmap at best trajectory step0 position
@@ -309,7 +344,7 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
         static_cast<unsigned int>((bx - cm->getOriginX()) / cm->getResolution()),
         static_cast<unsigned int>((by - cm->getOriginY()) / cm->getResolution()));
     float obst_raw = cost_val / 255.0f;
-    float obst_w = 0.55f * 1.0f * obst_raw;
+    float obst_w = critic_params.obstacle_ratio * critic_params.footprint_weight * obst_raw;
 
     std::ofstream flog(params_.log_file_path, std::ios::app);
     flog << std::fixed << std::setprecision(4)
@@ -318,6 +353,8 @@ geometry_msgs::msg::TwistStamped MPPISteeringController::computeVelocityCommands
          << " align=" << align_raw << "(w=" << align_w << ")"
          << " speed=" << speed_raw << "(w=" << speed_w << ")"
          << " obst=" << obst_raw << "(w=" << obst_w << ")"
+         << " | spd=" << spd << " mfv=" << mfv << " rspd=" << reward_spd
+         << " al=" << al << " lt=" << lt
          << " | yaw=" << yaw << " lh_yaw=" << lookahead_yaw
          << " err=" << angle_err
          << " dist2goal=" << dist_lh_to_goal

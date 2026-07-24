@@ -27,7 +27,8 @@ void VisualizationPublisher::publish(
     const std::vector<float> &costs,
     int best_idx, int N, int H,
     const Control &cmd, bool global_mode,
-    const std::string &frame_id)
+    const std::string &frame_id,
+    bool heading_mode)
 {
   if (!pub_) return;
 
@@ -52,7 +53,7 @@ void VisualizationPublisher::publish(
     ma.markers.push_back(m);
   }
 
-  // ── ② 前瞻点小球 (黄色) ──
+  // ── ② 前瞻点小球 (黄色=正常, 红色=heading 模式) ──
   {
     visualization_msgs::msg::Marker m;
     m.header.frame_id = frame_id; m.header.stamp = now;
@@ -60,13 +61,17 @@ void VisualizationPublisher::publish(
     m.pose.position.x = static_cast<float>(lh.wx);
     m.pose.position.y = static_cast<float>(lh.wy);
     m.pose.position.z = 0.06;
-    m.scale.x = 0.08; m.scale.y = 0.08; m.scale.z = 0.08;
-    m.color.r = 1.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.9f;
+    m.scale.x = 0.10; m.scale.y = 0.10; m.scale.z = 0.10;
+    if (heading_mode) {
+      m.color.r = 1.0f; m.color.g = 0.2f; m.color.b = 0.0f; m.color.a = 0.95f;  // 红色醒目
+    } else {
+      m.color.r = 1.0f; m.color.g = 1.0f; m.color.b = 0.0f; m.color.a = 0.9f;   // 黄色
+    }
     m.lifetime = lifetime;
     ma.markers.push_back(m);
   }
 
-  // ── ③ 机器人→前瞻点连线 (橙色) ──
+  // ── ③ 机器人→前瞻点连线 (橙色=正常, 红色=heading 模式) ──
   {
     visualization_msgs::msg::Marker m;
     m.header.frame_id = frame_id; m.header.stamp = now;
@@ -74,14 +79,18 @@ void VisualizationPublisher::publish(
     m.points.resize(2);
     m.points[0].x = rx;                        m.points[0].y = ry;                        m.points[0].z = 0.10;
     m.points[1].x = static_cast<float>(lh.wx); m.points[1].y = static_cast<float>(lh.wy); m.points[1].z = 0.10;
-    m.scale.x = 0.02;
-    m.color.r = 1.0f; m.color.g = 0.6f; m.color.b = 0.0f; m.color.a = 0.7f;
+    m.scale.x = 0.03;
+    if (heading_mode) {
+      m.color.r = 1.0f; m.color.g = 0.2f; m.color.b = 0.0f; m.color.a = 0.8f;  // 红色
+    } else {
+      m.color.r = 1.0f; m.color.g = 0.6f; m.color.b = 0.0f; m.color.a = 0.7f;  // 橙色
+    }
     m.lifetime = lifetime;
     ma.markers.push_back(m);
   }
 
   // ── ④ 最优轨迹 (绿色 LINE_STRIP) ──
-  if (best_idx >= 0 && best_idx < N) {
+  if (best_idx >= 0 && best_idx < N && !batch.x.empty()) {
     visualization_msgs::msg::Marker m;
     m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 3; m.type = m.LINE_STRIP; m.action = m.ADD;
@@ -99,7 +108,7 @@ void VisualizationPublisher::publish(
   }
 
   // ── ⑤ 采样轨迹散布 (浅蓝色, num_vis_trajs_ 条均匀采样) ──
-  {
+  if (!batch.x.empty()) {
     int step = std::max(1, N / num_vis_trajs_);
     visualization_msgs::msg::Marker m;
     m.header.frame_id = frame_id; m.header.stamp = now;
@@ -150,18 +159,26 @@ void VisualizationPublisher::publish(
     }
   }
 
-  // ── ⑦ 指令数值文本 (白色) ──
+  // ── ⑦ 指令数值文本 (白色; heading 模式加前缀) ──
   {
     visualization_msgs::msg::Marker m;
     m.header.frame_id = frame_id; m.header.stamp = now;
     m.ns = "mppi"; m.id = 6; m.type = m.TEXT_VIEW_FACING; m.action = m.ADD;
     m.pose.position.x = rx + 0.3f; m.pose.position.y = ry + 0.3f; m.pose.position.z = 0.20;
     m.scale.z = 0.07;
-    m.color.r = 1.0f; m.color.g = 1.0f; m.color.b = 1.0f; m.color.a = 0.9f;
+    if (heading_mode) {
+      m.color.r = 1.0f; m.color.g = 0.3f; m.color.b = 0.0f; m.color.a = 0.95f;  // 红色文字
+    } else {
+      m.color.r = 1.0f; m.color.g = 1.0f; m.color.b = 1.0f; m.color.a = 0.9f;   // 白色文字
+    }
     m.lifetime = lifetime;
     char buf[64];
-    snprintf(buf, sizeof(buf), "vx=%.2f vy=%.2f ang=%.2f",
-             cmd.vx, cmd.vy, cmd.omega);
+    if (heading_mode) {
+      snprintf(buf, sizeof(buf), "[HEADING] ang=%.2f", cmd.omega);
+    } else {
+      snprintf(buf, sizeof(buf), "vx=%.2f vy=%.2f ang=%.2f",
+               cmd.vx, cmd.vy, cmd.omega);
+    }
     m.text = buf;
     ma.markers.push_back(m);
   }

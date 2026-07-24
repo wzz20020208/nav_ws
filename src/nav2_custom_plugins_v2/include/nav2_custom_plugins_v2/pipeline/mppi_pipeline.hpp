@@ -20,7 +20,7 @@
  *              │
  *              ▼  GPU 显存: traj_x, traj_y, sampled_vx/vy/delta, base_vx/vy/delta
  *   GPU:
- *     launchSampleAndCost(...)                      ← 代价评估 kernel (后续)
+ *     launchCostKernel(...)                          ← 代价评估 kernel (后续)
  *              │
  *              ▼  d_costs_[N], d_result_seq_[H×4]
  *   CPU:
@@ -41,6 +41,7 @@ struct CostmapInfo;
 struct Footprint;
 struct PathInfo;
 struct GoalInfo;
+struct CriticParams;
 
 namespace nav2_custom_plugins_v2
 {
@@ -88,11 +89,13 @@ public:
   void uploadBase(const ControlSequence &base, int H, cudaStream_t stream);
 
   /// 启动代价评估 kernel + 下载结果
+  /// @param critic_params 大类权重等代价参数 (从 MPPIParams 映射)
   /// @return N 条轨迹的总代价
   std::vector<float> launchCost(const struct CostmapInfo &cmap,
                                 const struct Footprint &fp,
                                 const struct PathInfo &path,
                                 const struct GoalInfo &goal,
+                                const struct CriticParams &critic_params,
                                 int N, int H, cudaStream_t stream);
 
   /// 加权求和 + 下载最优控制序列
@@ -104,6 +107,11 @@ private:
   GPUEngine      &engine_;     ///< 持有引用, 不拥有 — GPUEngine::upload(name, data, stream)
   GPUUploader    &uploader_;   ///< 持有引用, 不拥有 — GPUUploader (后续 download 等)
   const MPPIParams &params_;   ///< MPPI 参数 (dt, max_v, max_w, ...)
+
+  /// double→float 转换缓冲区 (base.vx/vy/omega 是 std::vector<double>)
+  std::vector<float> float_fbuf_;
+  std::vector<float> float_fbuf2_;
+  std::vector<float> float_fbuf3_;
 };
 
 }  // namespace nav2_custom_plugins_v2

@@ -38,10 +38,27 @@ struct PathInfo {
   float goal_y = 0.0f;           ///< 终点世界坐标 y
 };
 
+/// 代价函数参数 — 供 CriticManager 大类/子类权重配置 (GPU-compatible)
+struct CriticParams {
+  // 大类权重 (Step 1)
+  float obstacle_ratio = 0.60f;   ///< OBSTACLE 大类权重
+  float tracking_ratio = 0.30f;   ///< HEADING 大类权重
+  float speed_ratio    = 0.10f;   ///< SPEED 大类权重
+
+  // 子类权重 (Step 3) — 大类内各子代价的相对权重
+  float footprint_weight       = 1.0f;  ///< OBSTACLE: FootprintCritic
+  float path_align_weight      = 1.0f;  ///< HEADING:  PathAlignCritic (点到路径距离)
+  float path_angle_weight      = 2.0f;  ///< HEADING:  PathAngleCritic (朝向对齐)
+  float path_deviation_weight  = 0.3f;  ///< HEADING:  PathDeviationCritic (走廊偏离)
+  float speed_reward_weight      = 1.0f;  ///< SPEED:    SpeedRewardCritic
+  float base_similarity_weight   = 0.0f;  ///< SPEED:    BaseSimilarityCritic (warm-start 一致性)
+};
+
 /// 目标/速度参考 — 供 SPEED 大类代价函数使用 (GPU-compatible)
 struct GoalInfo {
   float target_vx_r = 0.0f;      ///< 期望速度 x 分量 (机器人坐标系), 供 SpeedRewardCritic
   float target_vy_r = 0.0f;      ///< 期望速度 y 分量 (机器人坐标系)
+  float max_feasible_v = 0.0f;   ///< 该方向矩形速度包络可达最大速度, SpeedRewardCritic 奖励上限
   float goal_x = 0.0f;           ///< 终点世界坐标 x, 供 TerminalDistCritic
   float goal_y = 0.0f;           ///< 终点世界坐标 y
   float lookahead_x = 0.0f;      ///< 前瞻点世界坐标 x, 供 kernel overshoot 检测
@@ -83,6 +100,14 @@ struct MPPIParams {
   double footprint_left = 0.28;
   double footprint_right = 0.28;
 
+  // 子类权重 — 大类内各子代价的相对重要性
+  double footprint_weight       = 1.0;  ///< OBSTACLE: FootprintCritic
+  double path_align_weight      = 1.0;  ///< HEADING:  PathAlignCritic (点到路径距离)
+  double path_angle_weight      = 2.0;  ///< HEADING:  PathAngleCritic (朝向对齐)
+  double path_deviation_weight  = 0.3;  ///< HEADING:  PathDeviationCritic (走廊偏离)
+  double speed_reward_weight      = 1.0;  ///< SPEED:    SpeedRewardCritic
+  double base_similarity_weight   = 0.0;  ///< SPEED:    BaseSimilarityCritic (warm-start 一致性)
+
   // 前瞻
   double min_lookahead_dist = 0.8;
   double lookahead_kp = 0.3;           ///< 前瞻减速最低比例 (0=完全停止, 1=不减速)
@@ -112,57 +137,6 @@ struct MPPIParams {
   bool enable_file_log = true;
   std::string log_file_path = "/tmp/mppi_steering_controller.log";
 };
-
-/// YAML 参数表 — 新增参数只需在此加一行
-struct IntParam   { const char *name; int MPPIParams::*ptr; };
-struct DblParam   { const char *name; double MPPIParams::*ptr; };
-struct BoolParam  { const char *name; bool MPPIParams::*ptr; };
-struct StrParam   { const char *name; std::string MPPIParams::*ptr; };
-
-inline constexpr IntParam kIntParams[] = {
-  {"num_samples",        &MPPIParams::num_samples},
-  {"prediction_horizon", &MPPIParams::prediction_horizon},
-};
-
-inline constexpr DblParam kDblParams[] = {
-  {"dt",                 &MPPIParams::dt},
-  {"max_v",              &MPPIParams::max_v},
-  {"min_v",              &MPPIParams::min_v},
-  {"max_vy",             &MPPIParams::max_vy},
-  {"max_w",              &MPPIParams::max_w},
-  {"action_std_v",       &MPPIParams::action_std_v},
-  {"action_std_vy",      &MPPIParams::action_std_vy},
-  {"action_std_w",       &MPPIParams::action_std_w},
-  {"lambda",             &MPPIParams::lambda},
-  {"cost_scale",         &MPPIParams::cost_scale},
-  {"obstacle_ratio",     &MPPIParams::obstacle_ratio},
-  {"tracking_ratio",     &MPPIParams::tracking_ratio},
-  {"speed_ratio",        &MPPIParams::speed_ratio},
-  {"footprint_front",    &MPPIParams::footprint_front},
-  {"footprint_back",     &MPPIParams::footprint_back},
-  {"footprint_left",     &MPPIParams::footprint_left},
-  {"footprint_right",    &MPPIParams::footprint_right},
-  {"min_lookahead_dist",          &MPPIParams::min_lookahead_dist},
-  {"lookahead_kp",               &MPPIParams::lookahead_kp},
-  {"lookahead_decel_dist",       &MPPIParams::lookahead_decel_dist},
-  {"lookahead_overshoot_weight", &MPPIParams::lookahead_overshoot_weight},
-  {"terminal_angle_dist",      &MPPIParams::terminal_angle_dist},
-  {"terminal_angle_tolerance", &MPPIParams::terminal_angle_tolerance},
-  {"ema_alpha",          &MPPIParams::ema_alpha},
-};
-
-inline constexpr BoolParam kBoolParams[] = {
-  {"use_planner_yaw",             &MPPIParams::use_planner_yaw},
-  {"use_global_mode",             &MPPIParams::use_global_mode},
-  {"enable_heading_speed_limit",  &MPPIParams::enable_heading_speed_limit},
-  {"enable_narrow_passage",       &MPPIParams::enable_narrow_passage},
-  {"enable_ema",                  &MPPIParams::enable_ema},
-  {"enable_file_log",             &MPPIParams::enable_file_log},
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 基础类型
-// ═══════════════════════════════════════════════════════════════════════════
 
 /// 控制量 [vx, vy, omega]
 struct Control {

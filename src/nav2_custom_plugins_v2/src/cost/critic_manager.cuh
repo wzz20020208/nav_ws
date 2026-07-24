@@ -28,7 +28,7 @@
  * 两层归一化
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- *   层 1 — 大类内平均: 各 Category 容器内部做加权平均 (Σ w×fn / active_count)
+ *   层 1 — 大类内加权和: 各 Category 容器内部 Σ (w × fn), 不平均
  *   层 2 — 大类间加权: cat_weights[] 乘大类结果
  *
  *   total = Σ cat_weights[c] × category.evaluate(...)
@@ -69,14 +69,23 @@
 class CriticManager
 {
 public:
-  __host__ __device__ void init()
+  /// @param cp 代价参数 (大类+子类权重, 从 CPU 端 MPPIParams 映射后传入)
+  __host__ __device__ void init(const CriticParams &cp)
   {
     obstacle_.init();
     heading_ .init();
     speed_   .init();
-    cat_weights_[0] = 0.60f; // OBSTACLE
-    cat_weights_[1] = 0.30f; // HEADING
-    cat_weights_[2] = 0.10f; // SPEED
+    cat_weights_[0] = cp.obstacle_ratio;
+    cat_weights_[1] = cp.tracking_ratio;
+    cat_weights_[2] = cp.speed_ratio;
+
+    // 子类权重 — 大类内的各子代价相对重要性
+    obstacle_.setWeight(0, cp.footprint_weight);        // FootprintCritic
+    heading_ .setWeight(0, cp.path_align_weight);       // PathAlignCritic
+    heading_ .setWeight(1, cp.path_angle_weight);       // PathAngleCritic
+    heading_ .setWeight(2, cp.path_deviation_weight);   // PathDeviationCritic
+    speed_   .setWeight(0, cp.speed_reward_weight);     // SpeedRewardCritic
+    speed_   .setWeight(1, cp.base_similarity_weight);  // BaseSimilarityCritic
   }
 
   __host__ __device__ void setCategoryWeight(CriticCategory cat, float w)
@@ -91,17 +100,21 @@ public:
   /// @brief 评估单步代价 — 三大类直调, 加权求和
   ///
   /// @param x, y, cos_t, sin_t, theta  轨迹点位姿 (cos_t/sin_t 预计算, 省三角函数)
-  /// @param vx, vy                     当前步控制量
+  /// @param vx, vy, omega              当前步控制量
   /// @param cmap                       代价地图
   /// @param fp                         足迹参数
   /// @param path                       全局路径数据 (HEADING 大类使用)
   /// @param goal                       目标/速度参考 (SPEED 大类使用)
+  /// @param t                          当前时间步 (0..H-1)
+  /// @param base_vx, base_vy, base_omega  warm-start 基序列指针 [H] (SPEED 大类 BaseSimilarityCritic 使用)
   /// @return                           加权总代价
   __device__ float evaluate(
       float x, float y, float cos_t, float sin_t, float theta,
       float vx, float vy, float omega,
       const CostmapInfo &cmap, const Footprint &fp,
-      const PathInfo &path, const GoalInfo &goal) const
+      const PathInfo &path, const GoalInfo &goal,
+      int t, const float *base_vx,
+      const float *base_vy, const float *base_omega) const
   {
     // OBSTACLE: 检测碰撞
     float obst = obstacle_.evaluate(x, y, cos_t, sin_t, vx, vy, cmap, fp);
@@ -109,8 +122,8 @@ public:
     // HEADING:  路径对准 + 朝向对齐 (delta) + 走廊偏离
     float head = heading_.evaluate(x, y, theta, omega, path);
 
-    // SPEED:    速度方向对齐前瞻点 (180° 对称)
-    float spd  = speed_.evaluate(vx, vy, goal);
+    // SPEED:    速度方向对齐 + warm-start 一致性约束
+    float spd  = speed_.evaluate(vx, vy, omega, goal, t, base_vx, base_vy, base_omega);
 
     // 大类间加权求和 — 直接明了, 无任何中转
     return cat_weights_[0] * obst + cat_weights_[1] * head + cat_weights_[2] * spd;
@@ -122,7 +135,7 @@ private:
   SpeedCategory    speed_;     ///< SPEED    分类容器
 
   /// 大类间权重 — 控制三大代价的相对重要性
-  /// cat_weights_[OBSTACLE] = 0.4, cat_weights_[HEADING] = 0.3, cat_weights_[SPEED] = 0.3
+  /// 默认值仅作 fallback, 实际由 init() 覆盖为 {0.60, 0.30, 0.10}
   float cat_weights_[static_cast<int>(CriticCategory::NUM_CATEGORIES)] = {0.4f, 0.3f, 0.3f};
 };
 

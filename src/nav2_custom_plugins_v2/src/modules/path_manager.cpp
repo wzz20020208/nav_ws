@@ -21,6 +21,12 @@ void PathManager::setPath(const nav_msgs::msg::Path &path)
   prev_closest_idx_ = 0;  // 新路径, 重置搜索起点
 }
 
+void PathManager::refreshTransform(const nav_msgs::msg::Path &transformed)
+{
+  plan_ = transformed;
+  // 注意: 不重置 prev_closest_idx_, 保留路径跟踪连续性
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // findClosestIndex — 增量搜索, 防止 closest_idx 跳变
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -128,11 +134,20 @@ void PathManager::buildPathInfo(PathInfo &info, double path_tangent) const
 // buildGoalInfo — 填充 GoalInfo
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void PathManager::buildGoalInfo(GoalInfo &info, double target_yaw) const
+void PathManager::buildGoalInfo(GoalInfo &info, double target_yaw,
+                                  double max_v, double max_vy) const
 {
   // 期望速度方向 (机器人 body 系, 与 rollout vx/vy 同系)
-  info.target_vx_r = static_cast<float>(std::cos(target_yaw));
-  info.target_vy_r = static_cast<float>(std::sin(target_yaw));
+  float tvx = static_cast<float>(std::cos(target_yaw));
+  float tvy = static_cast<float>(std::sin(target_yaw));
+  info.target_vx_r = tvx;
+  info.target_vy_r = tvy;
+
+  // 该方向矩形速度包络可达最大速度: min(max_v / |tvx|, max_vy / |tvy|)
+  // 纯前向 → max_v, 纯侧向 → max_vy, 斜向自动取紧的一边
+  float ax = std::abs(tvx) > 1e-6f ? static_cast<float>(max_v) / std::abs(tvx) : static_cast<float>(max_vy);
+  float ay = std::abs(tvy) > 1e-6f ? static_cast<float>(max_vy) / std::abs(tvy) : static_cast<float>(max_v);
+  info.max_feasible_v = std::min(ax, ay);
 
   // 终点坐标
   if (!plan_.poses.empty()) {

@@ -28,38 +28,48 @@ CriticManager                           (critic_manager.cuh)
 └── SpeedCategory     — subs_[0] = {speedRewardFn}
 ```
 
-大类权重: OBSTACLE=0.50, HEADING=0.40, SPEED=0.10 (YAML 配置)
+大类权重: OBSTACLE=0.60, HEADING=0.30, SPEED=0.10
+(CriticManager::init() 硬编码, YAML 参数 obstacle_ratio/tracking_ratio/speed_ratio 待接入)
+
+## 两层归一化
+
+层 1 — 大类内加权和: 各 Category 容器内部 Σ(w × fn), 不平均
+层 2 — 大类间加权: cat_weights[] 乘大类结果
+
+total = Σ cat_weights[c] × category.evaluate(...)
 
 ## Kernel 每步调用
 
 ```
-CriticManager::evaluate(x, y, θ, vx, vy, cmap, fp, path, goal)
+CriticManager::evaluate(x, y, θ, vx, vy, ω, cmap, fp, path, goal)
   ├── cat_w[OBSTACLE] × obstacle_.evaluate()
   │     → FootprintCritic: 足迹网格 → costmap 双线性插值 → n⁴ 碰撞惩罚
   ├── cat_w[HEADING]  × heading_.evaluate()
-  │     → PathAlign:      1-exp(-dist²)
-  │     → PathAngle:      4×err² (不归一化, 原始平方)
-  │     → PathDeviation:  1-exp(-excess²), corridor=0.5m
+  │     → PathAlign:      min_sq (点到路径段最近距离平方, m²)
+  │     → PathAngle:      4×err² (不归一化, 原始平方, rad²)
+  │     → PathDeviation:  excess², excess=max(0, dist−0.5m), m²
   └── cat_w[SPEED]   × speed_.evaluate()
-        → SpeedReward: THEMIS 公式 (alignment 奖励 + lateral×2 侧向惩罚)
+        → SpeedReward: THEMIS 公式 (对齐奖励 + 侧向抑制×2)
 ```
 
 ## SpeedRewardCritic — THEMIS 公式
 
 ```cpp
-alignment = (vx×target_vx_r + vy×target_vy_r) / speed;   // cos(err)
-lateral   = |vx×target_vy_r - vy×target_vx_r| / speed;    // |sin(err)|
-if (alignment < 0)  return speed × 5.0;                    // 反向重罚
-return -speed × alignment + 2.0 × speed × lateral;         // 对齐奖励 + 侧向抑制
+speed = hypot(vx, vy)
+if speed < 0.02: return 0                                    // 停止中性
+alignment = (vx×target_vx_r + vy×target_vy_r) / speed;       // cos(err)
+lateral   = |vx×target_vy_r - vy×target_vx_r| / speed;        // |sin(err)|
+if (alignment < 0)  return speed × 5.0;                       // 反向重罚
+return -speed × alignment + 2.0 × speed × lateral;            // 对齐奖励 + 侧向抑制
 // 0° → -speed, 26.6° → 0 (中性), 45° → +0.71×speed
 ```
 
 ## 新增代价子类
 
-给 OBSTACLE 加 DistanceFieldCritic:
-1. 写子类: `class DistanceFieldCritic : public ObstacleCritic { compute() }`
-2. 写 wrapper: `static float distanceFn(...) { D c; return c.compute(...); }`
-3. 注册: `ObstacleCategory::init()` 加 `subs_[N] = {distanceFn, true, weight}`
+给 HEADING 加新子类:
+1. 写子类: `class NewCritic : public HeadingCritic { compute() }`
+2. 写 wrapper: `static float newCriticFn(...) { N c; return c.compute(...); }`
+3. 注册: `HeadingCategory::init()` 加 `subs_[N] = {newCriticFn, true, weight}`
 → CriticManager 不动
 
 ## GPU 数据结构
@@ -67,6 +77,6 @@ return -speed × alignment + 2.0 × speed × lateral;         // 对齐奖励 + 
 | 结构 | 用途 | 字段 |
 |------|------|------|
 | CostmapInfo | OBSTACLE | data ptr, w, h, res, origin_x/y |
-| Footprint | OBSTACLE | front/back/left/right, samples, rear_penalty |
-| PathInfo | HEADING | x/y ptr, num_pts, path_tangent, goal_yaw |
+| Footprint | OBSTACLE | front/back/left/right, sample_spacing, rear_obstacle_cost |
+| PathInfo | HEADING | x/y ptr, num_pts, path_tangent, goal_yaw, goal_x/y |
 | GoalInfo | SPEED | target_vx_r, target_vy_r, goal_x/y, lookahead_x/y, overshoot_weight |

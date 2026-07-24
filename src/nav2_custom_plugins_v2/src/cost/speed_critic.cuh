@@ -16,21 +16,19 @@
  * 算法参考 (来自 THEMIS nav2_custom_plugins PreferForwardCritic)
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- *   SpeedRewardCritic:
+ *   SpeedRewardCritic (1:1 THEMIS):
  *     speed = hypot(vx, vy)
- *     if speed ≈ 0: return 0
- *     angle_err = atan2(vy, vx) - atan2(target_vy_r, target_vx_r)
- *     abs_err = |angle_err|
- *     if abs_err > π/2 (背离前瞻点):
- *       return speed × (5.0 + 3.0 × (abs_err - π/2))  // 重度惩罚, 随角度递增
- *     else:
- *       return speed × (3.0 × abs_err - 1.0)          // 线性惩罚, 0°=奖励, ~19°=中性
+ *     if speed < 0.02: return 0                          // 停止中性
+ *     alignment = (vx×target_vx_r + vy×target_vy_r) / speed  // cos(err)
+ *     lateral   = |vx×target_vy_r - vy×target_vx_r| / speed   // |sin(err)|
+ *     if alignment < 0: return speed × 5.0                // 反向重罚
+ *     return -speed × alignment + 6.0 × speed × lateral   // 对齐奖励 + 侧向抑制
  *
- *   线性惩罚优于 cos 对齐:
- *     - 0°: 返回 -speed (奖励, 负代价)
- *     - ~19°: 返回 ≈0 (中性)
- *     - >19°: 递增正惩罚
- *     - 梯度 = 3×speed/rad, 远强于 cos 在 0° 处的零梯度
+ *   效果:
+ *     - 0°: 返回 -speed (最大奖励)
+ *     - ~9.5°: 返回 ≈0 (中性, atan(1/6))
+ *     - 45°: 返回 +3.53×speed (惩罚)
+ *     - >90°: 返回 +5.0×speed (重度惩罚)
  *
  *   TerminalDistCritic (见 mppi_gpu_kernels.cu, 非注册表子类):
  *     dist = sqrt((goal_x - x)² + (goal_y - y)²)
@@ -44,7 +42,7 @@
  *     → cat_w[SPEED] × speed_.evaluate(vx, vy, goal)
  *         → for i in subs_:
  *             subs_[i].fn(vx, vy, goal)  ← 函数指针直调
- *           return Σ(w × fn) / active_count
+ *           return Σ(w × fn)  // 加权和
  */
 
 #ifndef MPPI_SPEED_CRITIC_CUH_
@@ -78,7 +76,7 @@ class SpeedRewardCritic : public SpeedCritic
 public:
   /// speed reward: 1:1 THEMIS — 对齐奖励, 侧向重罚, 反向重罚
   ///   alignment = cos(err), lateral = |sin(err)|
-  ///   return -speed × alignment + 2.0 × speed × lateral
+  ///   return -reward_speed × alignment + 6.0 × speed × lateral
   ///   0° → -speed (奖励),  26.6° → 0 (中性),  45° → +0.71×speed (惩罚)
   __device__ float compute(float vx, float vy, const GoalInfo &goal) const
   {
@@ -87,7 +85,31 @@ public:
     float alignment = (vx * goal.target_vx_r + vy * goal.target_vy_r) / speed;  // cos(err)
     float lateral = fabsf(vx * goal.target_vy_r - vy * goal.target_vx_r) / speed; // |sin(err)|
     if (alignment < 0.0f) return speed * 5.0f;  // 反向 (>90°): 重罚
-    return -speed * alignment + 2.0f * speed * lateral;  // 对齐奖励 + 侧向抑制
+    float reward_speed = fminf(speed, goal.max_feasible_v);  // cap 奖励上限
+    return -reward_speed * alignment + 6.0f * speed * lateral;
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BaseSimilarityCritic — warm-start 一致性约束
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// 比较当前采样控制量 (vx, vy, omega) 与 warm-start base 序列对应步的控制量,
+// 欧氏距离平方作为代价 — 偏差越大代价越高, 约束相邻帧最优序列不跳变。
+//
+//   代价 = (vx - base_vx[t])² + (vy - base_vy[t])² + (ω - base_ω[t])²
+
+class BaseSimilarityCritic : public SpeedCritic
+{
+public:
+  __device__ float compute(float vx, float vy, float omega,
+                           int t, const float *base_vx,
+                           const float *base_vy, const float *base_omega) const
+  {
+    float dvx = vx - base_vx[t];
+    float dvy = vy - base_vy[t];
+    float dw  = omega - base_omega[t];
+    return dvx * dvx + dvy * dvy + dw * dw;
   }
 };
 
@@ -106,10 +128,16 @@ public:
   // SubFn — 子代价函数签名
   // ═════════════════════════════════════════════════════════════════════════
   //
-  // SPEED 子类只需要速度分量和目标方向, 不需要位置/朝向/代价地图。
+  // SPEED 子类需要速度分量和目标方向, 不需要位置/朝向/代价地图。
   // 签名与 obstacle/heading 不同: 每个大类有独立的 SubFn。
+  //
+  // 新增 base_vx/vy/omega + t: 供 BaseSimilarityCritic 与 warm-start 比较;
+  // SpeedRewardCritic 忽略这些参数。
 
-  typedef float (*SubFn)(float vx, float vy, const GoalInfo &goal);
+  typedef float (*SubFn)(float vx, float vy, float omega,
+                         const GoalInfo &goal,
+                         int t, const float *base_vx,
+                         const float *base_vy, const float *base_omega);
 
   /// 注册表条目: { 函数指针, 开关, 大类内权重 }
   struct SubEntry
@@ -124,10 +152,25 @@ public:
   // ═════════════════════════════════════════════════════════════════════════
 
   __device__ static float speedRewardFn(
-      float vx, float vy, const GoalInfo &goal)
+      float vx, float vy, float omega,
+      const GoalInfo &goal,
+      int /*t*/, const float * /*base_vx*/,
+      const float * /*base_vy*/, const float * /*base_omega*/)
   {
     SpeedRewardCritic c;
+    (void)omega;  // SpeedRewardCritic 不使用 omega/base
     return c.compute(vx, vy, goal);
+  }
+
+  __device__ static float baseSimilarityFn(
+      float vx, float vy, float omega,
+      const GoalInfo &goal,
+      int t, const float *base_vx,
+      const float *base_vy, const float *base_omega)
+  {
+    (void)goal;  // BaseSimilarityCritic 不使用 goal
+    BaseSimilarityCritic c;
+    return c.compute(vx, vy, omega, t, base_vx, base_vy, base_omega);
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -136,8 +179,9 @@ public:
 
   __host__ __device__ void init()
   {
-    subs_[0] = { speedRewardFn, true, 1.0f };
-    count_ = 1;
+    subs_[0] = { speedRewardFn,       true, 1.0f };
+    subs_[1] = { baseSimilarityFn,    true, 0.0f };
+    count_ = 2;
   }
 
   __host__ __device__ void setWeight(int idx, float w)
@@ -154,9 +198,13 @@ public:
   // evaluate — SPEED 大类求值
   // ═════════════════════════════════════════════════════════════════════════
   //
-  /// 遍历注册表 → 函数指针直调 → 加权平均
-  /// @return SPEED 大类归一化代价 (可能为负 = 奖励)
-  __device__ float evaluate(float vx, float vy, const GoalInfo &goal) const
+  /// 遍历注册表 → 函数指针直调 → 加权和
+  /// @param t 当前时间步, base 指针: 供 BaseSimilarityCritic 与 warm-start 比较
+  /// @return SPEED 大类代价 (可能为负 = 奖励, 加权和)
+  __device__ float evaluate(float vx, float vy, float omega,
+                             const GoalInfo &goal,
+                             int t, const float *base_vx,
+                             const float *base_vy, const float *base_omega) const
   {
     float total = 0.0f;
     int active = 0;
@@ -164,7 +212,7 @@ public:
     for (int i = 0; i < count_; ++i) {
       const SubEntry &e = subs_[i];
       if (!e.enabled) continue;
-      total += e.weight * e.fn(vx, vy, goal);
+      total += e.weight * e.fn(vx, vy, omega, goal, t, base_vx, base_vy, base_omega);
       active++;
     }
 

@@ -230,7 +230,7 @@ public:
   // evaluate — HEADING 大类求值
   // ═════════════════════════════════════════════════════════════════════════
   //
-  /// 遍历注册表 → 函数指针直调 → 加权平均
+  /// 遍历注册表 → 函数指针直调 → 加权和
   /// @return HEADING 大类归一化代价 (类内平均后)
   __device__ float evaluate(
       float x, float y, float theta, float omega, const PathInfo &path) const

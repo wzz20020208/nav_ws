@@ -27,23 +27,26 @@ Kernel 启动:
 ## Kernel (mppi_gpu_kernels.cu)
 
 ### cost_eval_kernel
-每线程一条轨迹 (N threads):
+N 线程, grid = ceil(N/256), block = 256:
 ```
 for t in 0..H:
-    CriticManager.evaluate(x, y, θ, vx, vy, cmap, fp, path, goal)
+    CriticManager.evaluate(x, y, θ, vx, vy, ω, cmap, fp, path, goal)
     // → OBSTACLE + HEADING + SPEED 三层代价
     // 前瞻越界惩罚: if (along > 0) total += overshoot_weight × along²
-d_costs[s] = total / H
+// 终点距离代价: total += hypot(goal_x - x, goal_y - y)
+d_costs[s] = cost_scale × total / H
 ```
 
 ### weighted_sum_kernel
-单 block (H threads):
+2D grid dim3(ceil(N/256), H), block=256:
 ```
-for s in 0..N:
+Per thread = one (trajectory s, time_step t) pair:
     w = exp(-(cost[s] - min_cost) / lambda)
-    for t in 0..H:
-        result[t] += w × rollout[s,t]
-result /= Σw
+    atomicAdd(&result[t*4+0], w × sampled_vx[s,t])
+    atomicAdd(&result[t*4+1], w × sampled_vy[s,t])
+    atomicAdd(&result[t*4+2], w × sampled_omega[s,t])
+    atomicAdd(&result[t*4+3], w)                 // 归一化分母 (weight_sum)
+// CPU 侧: result[t*4+c] / result[t*4+3] → 加权平均控制量
 ```
 
 ## MPPIPipeline (pipeline/)

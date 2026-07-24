@@ -91,12 +91,12 @@ controller_server:
       cost_scale: 50.0
       obstacle_ratio: 0.50
       tracking_ratio: 0.40
-      speed_ratio: 0.10
+      speed_ratio: 0.15
       lambda: 0.05
 
       # ── 噪声 ──
-      action_std_v: 0.5
-      action_std_vy: 0.5
+      action_std_v: 0.2
+      action_std_vy: 0.1
       action_std_w: 0.4
 
       # ── 碰撞 ──
@@ -104,6 +104,14 @@ controller_server:
       footprint_back: 0.17
       footprint_left: 0.28
       footprint_right: 0.28
+
+      # ── 子类权重 ──
+      footprint_weight: 1.0
+      path_align_weight: 1.0
+      path_angle_weight: 2.0
+      path_deviation_weight: 0.3
+      speed_reward_weight: 1.0
+      base_similarity_weight: 0.5     # warm-start 一致性约束
 
       # ── 前瞻 ──
       min_lookahead_dist: 0.3

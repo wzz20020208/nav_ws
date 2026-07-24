@@ -53,13 +53,15 @@ public:
   /// @param cmd         输出控制量
   /// @param global_mode 输出模式 (影响速度箭头方向)
   /// @param frame_id    marker 坐标系 (与路径数据一致)
+  /// @param heading_mode 是否为 heading 原地旋转模式 (影响前瞻点颜色)
   void publish(const RobotState &robot,
                const LookaheadResult &lh,
                const BatchTrajectories &batch,
                const std::vector<float> &costs,
                int best_idx, int N, int H,
                const Control &cmd, bool global_mode,
-               const std::string &frame_id);
+               const std::string &frame_id,
+               bool heading_mode = false);
 
 private:
   rclcpp_lifecycle::LifecycleNode *node_ = nullptr;

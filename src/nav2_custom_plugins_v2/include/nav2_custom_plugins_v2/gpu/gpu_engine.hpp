@@ -28,6 +28,7 @@ struct CostmapInfo;
 struct Footprint;
 struct PathInfo;
 struct GoalInfo;
+struct CriticParams;
 
 namespace nav2_custom_plugins_v2
 {
@@ -129,6 +130,7 @@ public:
   void launchCostKernel(
       const struct CostmapInfo &cmap, const struct Footprint &fp,
       const struct PathInfo &path, const struct GoalInfo &goal,
+      const struct CriticParams &critic_params,
       float cost_scale, int N, int H, cudaStream_t stream);
 
   /// 加权求和 kernel: softmax 加权 N 条轨迹控制量 → d_result_seq[H×4]
