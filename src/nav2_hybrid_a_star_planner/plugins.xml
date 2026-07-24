@@ -1,0 +1,11 @@
+<library path="nav2_hybrid_a_star_planner">
+  <class name="nav2_hybrid_a_star_planner/HybridAStarPlanner"
+         type="nav2_hybrid_a_star_planner::HybridAStarPlanner"
+         base_class_type="nav2_core::GlobalPlanner">
+    <description>
+      Hybrid-A* global planner with kinematic motion primitives for differential-drive robots.
+      Continuous-state search with Reeds-Shepp analytic expansion and 2D Dijkstra heuristic.
+      Use: plugin: "nav2_hybrid_a_star_planner/HybridAStarPlanner"
+    </description>
+  </class>
+</library>

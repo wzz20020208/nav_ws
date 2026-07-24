@@ -90,7 +90,4 @@ BASE_LINK
 
 ## 已知问题
 
-1. **depth_to_pcl**: 降采样 `decimation_x/y=40` 后，输出的 CameraInfo K 矩阵和宽高未同步缩放 (仍为 960×640)，导致点云 3D 投影偏移
-2. **base_state_to_odom**: C++ 和 Python 双版本，应清理只保留一个
-3. **相机定义不一致**: `th02_a7_description/urdf/` 和 `Simulation/models/themis/model.sdf` 中的相机参数 (FOV, 分辨率) 存在差异
-4. **nav_launch**: 使用 `ExecuteProcess` 裸启命令而非 ROS 2 标准的 `IncludeLaunchDescription`
+

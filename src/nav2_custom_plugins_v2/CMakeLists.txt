@@ -106,6 +106,36 @@ set_target_properties(test_critics PROPERTIES
   CUDA_ARCHITECTURES "86"
 )
 
+# ── MPPI Benchmark ──
+add_executable(benchmark_mppi
+  test/benchmark_mppi.cu
+)
+
+target_include_directories(benchmark_mppi PRIVATE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/gpu>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/cost>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/modules>
+  ${CUDAToolkit_INCLUDE_DIRS}
+)
+
+target_link_libraries(benchmark_mppi CUDA::cudart)
+
+# OpenMP for CPU parallel cost evaluation
+# nvcc 需要通过 -Xcompiler 转发 OpenMP flag 到 host compiler (gcc)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(benchmark_mppi OpenMP::OpenMP_CXX)
+  target_compile_options(benchmark_mppi PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
+  )
+endif()
+
+# 根据实际 GPU 调整 SM 架构 (见 README.md 依赖章节的注意事项)
+set_target_properties(benchmark_mppi PROPERTIES
+  CUDA_ARCHITECTURES "86"
+)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Plugin 注册 + 安装
 # ═══════════════════════════════════════════════════════════════════════════════
